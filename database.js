@@ -1,10 +1,14 @@
 const mysql = require('mysql2/promise');
 
-// Standard XAMPP MySQL configuration
+const isCloud = !!process.env.DB_HOST;
+
+// Dynamic MySQL configuration (Cloud + Localhost Fallback)
 const dbConfig = {
-  host: 'localhost',
-  user: 'root',
-  password: '', // Default XAMPP has no password for root
+  host: process.env.DB_HOST || 'localhost',
+  user: process.env.DB_USER || 'root',
+  password: process.env.DB_PASSWORD || '',
+  port: process.env.DB_PORT || 3306,
+  ...(isCloud ? { ssl: { rejectUnauthorized: false } } : {})
 };
 
 let mysqlPool = null;
@@ -12,12 +16,17 @@ let mysqlPool = null;
 async function initializeDatabase() {
   try {
     const connection = await mysql.createConnection(dbConfig);
-    await connection.query('CREATE DATABASE IF NOT EXISTS `blockchain_relief`');
+    
+    // Aiven strict permissions reject CREATE DATABASE, so we only initialize it locally.
+    if (!isCloud) {
+       await connection.query('CREATE DATABASE IF NOT EXISTS `blockchain_relief`');
+    }
+    
     await connection.end();
 
     mysqlPool = mysql.createPool({
       ...dbConfig,
-      database: 'blockchain_relief',
+      database: process.env.DB_NAME || 'blockchain_relief',
       waitForConnections: true,
       connectionLimit: 10,
       queueLimit: 0

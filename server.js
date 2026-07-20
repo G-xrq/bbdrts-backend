@@ -13,8 +13,7 @@ if (!JWT_SECRET) {
 }
 const secretKey = JWT_SECRET || 'super_secret_capstone_key_2026';
 
-const allowedOrigin = process.env.VITE_FRONTEND_URL || 'http://localhost:5173';
-app.use(cors({ origin: allowedOrigin }));
+app.use(cors()); // Allow all origins for Capstone flexibility
 app.use(express.json());
 
 // ── Authentication Middleware ──────────────────────────────

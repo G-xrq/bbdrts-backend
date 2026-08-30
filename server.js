@@ -905,9 +905,21 @@ app.get('/api/auth/me', authenticateToken, async (req, res) => {
     res.json({
       user: {
         id: user[idCol],
-        name: user.Org_Name || user.Username,
+        name: user.Name || user.Org_Name || user.Username,
         email: user.Username,
         role: req.user.role,
+        phone: user.Mobile_Number || null,
+        location: user.Location || null,
+        bio: user.Bio || null,
+        avatar_url: user.Avatar_Url || null,
+        website: user.Website || null,
+        emergency_hotline: user.Emergency_Hotline || null,
+        gcash_number: user.Gcash_Number || null,
+        maya_number: user.Maya_Number || null,
+        bank_details: user.Bank_Details || null,
+        title: user.Title || null,
+        agency: user.Agency || null,
+        preferences: user.Preferences_Json || null,
         wallet_address: user.Wallet_Address,
         verification_status: user.Verification_Status,
         sec_registration_no: user.Sec_Registration_No || null,
@@ -921,6 +933,130 @@ app.get('/api/auth/me', authenticateToken, async (req, res) => {
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
+  }
+});
+
+// ── Routes: Comprehensive Profile Update (Donors, NGOs, Admins) ──
+app.post('/api/auth/profile', authenticateToken, async (req, res) => {
+  const { role, id } = req.user;
+  const {
+    name,
+    phone,
+    location,
+    bio,
+    avatar_url,
+    website,
+    emergency_hotline,
+    gcash_number,
+    maya_number,
+    bank_details,
+    title,
+    agency,
+    preferences
+  } = req.body;
+
+  try {
+    if (role === 'donor') {
+      await db.query(
+        `UPDATE DONOR SET 
+          Name = ?, 
+          Mobile_Number = ?, 
+          Location = ?, 
+          Bio = ?, 
+          Avatar_Url = ?, 
+          Preferences_Json = ? 
+        WHERE Donor_ID = ?`,
+        [
+          (name || '').trim() || null,
+          (phone || '').trim() || null,
+          (location || '').trim() || null,
+          (bio || '').trim() || null,
+          avatar_url || null,
+          typeof preferences === 'object' ? JSON.stringify(preferences) : preferences || null,
+          id
+        ]
+      );
+    } else if (role === 'organization') {
+      await db.query(
+        `UPDATE ORGANIZATION SET 
+          Org_Name = ?, 
+          Mobile_Number = ?, 
+          Location = ?, 
+          Bio = ?, 
+          Avatar_Url = ?, 
+          Website = ?, 
+          Emergency_Hotline = ?, 
+          Gcash_Number = ?, 
+          Maya_Number = ?, 
+          Bank_Details = ? 
+        WHERE Org_ID = ?`,
+        [
+          (name || '').trim() || null,
+          (phone || '').trim() || null,
+          (location || '').trim() || null,
+          (bio || '').trim() || null,
+          avatar_url || null,
+          (website || '').trim() || null,
+          (emergency_hotline || '').trim() || null,
+          (gcash_number || '').trim() || null,
+          (maya_number || '').trim() || null,
+          typeof bank_details === 'object' ? JSON.stringify(bank_details) : bank_details || null,
+          id
+        ]
+      );
+    } else if (role === 'admin') {
+      await db.query(
+        `UPDATE ADMINISTRATOR SET 
+          Name = ?, 
+          Mobile_Number = ?, 
+          Title = ?, 
+          Agency = ?, 
+          Avatar_Url = ? 
+        WHERE Admin_ID = ?`,
+        [
+          (name || '').trim() || null,
+          (phone || '').trim() || null,
+          (title || '').trim() || null,
+          (agency || '').trim() || null,
+          avatar_url || null,
+          id
+        ]
+      );
+    }
+
+    // Fetch refreshed user
+    const tableName = getRoleTable(role);
+    const idCol = getRoleIDColumn(role);
+    const [rows] = await db.query(`SELECT * FROM ${tableName} WHERE ${idCol} = ?`, [id]);
+    const updatedUser = rows[0] || {};
+
+    res.json({
+      success: true,
+      message: 'Profile updated and synchronized successfully across protocol nodes.',
+      user: {
+        id: updatedUser[idCol],
+        name: updatedUser.Name || updatedUser.Org_Name || updatedUser.Username,
+        email: updatedUser.Username,
+        role,
+        phone: updatedUser.Mobile_Number || null,
+        location: updatedUser.Location || null,
+        bio: updatedUser.Bio || null,
+        avatar_url: updatedUser.Avatar_Url || null,
+        website: updatedUser.Website || null,
+        emergency_hotline: updatedUser.Emergency_Hotline || null,
+        gcash_number: updatedUser.Gcash_Number || null,
+        maya_number: updatedUser.Maya_Number || null,
+        bank_details: updatedUser.Bank_Details || null,
+        title: updatedUser.Title || null,
+        agency: updatedUser.Agency || null,
+        preferences: updatedUser.Preferences_Json || null,
+        wallet_address: updatedUser.Wallet_Address,
+        verification_status: updatedUser.Verification_Status
+      }
+    });
+  } catch (err) {
+    console.error('Profile update failed:', err);
+    res.status(500).json({ error: 'Failed to update profile: ' + err.message });
   }
 });
 

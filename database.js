@@ -117,6 +117,28 @@ function initSqlite() {
           )
         `);
 
+        sqliteDb.run(`ALTER TABLE DONOR ADD COLUMN Name TEXT`, () => {});
+        sqliteDb.run(`ALTER TABLE DONOR ADD COLUMN Mobile_Number TEXT`, () => {});
+        sqliteDb.run(`ALTER TABLE DONOR ADD COLUMN Location TEXT`, () => {});
+        sqliteDb.run(`ALTER TABLE DONOR ADD COLUMN Bio TEXT`, () => {});
+        sqliteDb.run(`ALTER TABLE DONOR ADD COLUMN Avatar_Url TEXT`, () => {});
+        sqliteDb.run(`ALTER TABLE DONOR ADD COLUMN Preferences_Json TEXT`, () => {});
+
+        sqliteDb.run(`ALTER TABLE ORGANIZATION ADD COLUMN Location TEXT`, () => {});
+        sqliteDb.run(`ALTER TABLE ORGANIZATION ADD COLUMN Bio TEXT`, () => {});
+        sqliteDb.run(`ALTER TABLE ORGANIZATION ADD COLUMN Avatar_Url TEXT`, () => {});
+        sqliteDb.run(`ALTER TABLE ORGANIZATION ADD COLUMN Website TEXT`, () => {});
+        sqliteDb.run(`ALTER TABLE ORGANIZATION ADD COLUMN Emergency_Hotline TEXT`, () => {});
+        sqliteDb.run(`ALTER TABLE ORGANIZATION ADD COLUMN Gcash_Number TEXT`, () => {});
+        sqliteDb.run(`ALTER TABLE ORGANIZATION ADD COLUMN Maya_Number TEXT`, () => {});
+        sqliteDb.run(`ALTER TABLE ORGANIZATION ADD COLUMN Bank_Details TEXT`, () => {});
+
+        sqliteDb.run(`ALTER TABLE ADMINISTRATOR ADD COLUMN Name TEXT`, () => {});
+        sqliteDb.run(`ALTER TABLE ADMINISTRATOR ADD COLUMN Title TEXT`, () => {});
+        sqliteDb.run(`ALTER TABLE ADMINISTRATOR ADD COLUMN Agency TEXT`, () => {});
+        sqliteDb.run(`ALTER TABLE ADMINISTRATOR ADD COLUMN Mobile_Number TEXT`, () => {});
+        sqliteDb.run(`ALTER TABLE ADMINISTRATOR ADD COLUMN Avatar_Url TEXT`, () => {});
+
         sqliteDb.run(`
           CREATE TABLE IF NOT EXISTS CAMPAIGN (
             Campaign_ID INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -299,17 +321,42 @@ async function initializeDatabase() {
     try { await mysqlPool.query(`ALTER TABLE ORGANIZATION ADD COLUMN Dswd_Accreditation_No VARCHAR(100)`); } catch (_) {}
     try { await mysqlPool.query(`ALTER TABLE ORGANIZATION ADD COLUMN Verified_At DATETIME`); } catch (_) {}
     try { await mysqlPool.query(`ALTER TABLE ORGANIZATION ADD COLUMN Verified_By VARCHAR(255)`); } catch (_) {}
-    try { await mysqlPool.query(`ALTER TABLE ORGANIZATION ADD COLUMN Audit_Notes TEXT`); } catch (_) {}
+    try { await mysqlPool.query(`ALTER TABLE ORGANIZATION ADD COLUMN Location VARCHAR(255)`); } catch (_) {}
+    try { await mysqlPool.query(`ALTER TABLE ORGANIZATION ADD COLUMN Bio TEXT`); } catch (_) {}
+    try { await mysqlPool.query(`ALTER TABLE ORGANIZATION ADD COLUMN Avatar_Url LONGTEXT`); } catch (_) {}
+    try { await mysqlPool.query(`ALTER TABLE ORGANIZATION ADD COLUMN Website VARCHAR(255)`); } catch (_) {}
+    try { await mysqlPool.query(`ALTER TABLE ORGANIZATION ADD COLUMN Emergency_Hotline VARCHAR(100)`); } catch (_) {}
+    try { await mysqlPool.query(`ALTER TABLE ORGANIZATION ADD COLUMN Gcash_Number VARCHAR(50)`); } catch (_) {}
+    try { await mysqlPool.query(`ALTER TABLE ORGANIZATION ADD COLUMN Maya_Number VARCHAR(50)`); } catch (_) {}
+    try { await mysqlPool.query(`ALTER TABLE ORGANIZATION ADD COLUMN Bank_Details TEXT`); } catch (_) {}
+
+    try { await mysqlPool.query(`ALTER TABLE ADMINISTRATOR ADD COLUMN Name VARCHAR(255)`); } catch (_) {}
+    try { await mysqlPool.query(`ALTER TABLE ADMINISTRATOR ADD COLUMN Title VARCHAR(255)`); } catch (_) {}
+    try { await mysqlPool.query(`ALTER TABLE ADMINISTRATOR ADD COLUMN Agency VARCHAR(255)`); } catch (_) {}
+    try { await mysqlPool.query(`ALTER TABLE ADMINISTRATOR ADD COLUMN Mobile_Number VARCHAR(50)`); } catch (_) {}
+    try { await mysqlPool.query(`ALTER TABLE ADMINISTRATOR ADD COLUMN Avatar_Url LONGTEXT`); } catch (_) {}
 
     await mysqlPool.query(`
       CREATE TABLE IF NOT EXISTS DONOR (
         Donor_ID INT AUTO_INCREMENT PRIMARY KEY,
         Username VARCHAR(255) UNIQUE NOT NULL,
         Password VARCHAR(255) NOT NULL,
+        Name VARCHAR(255),
+        Mobile_Number VARCHAR(50),
+        Location VARCHAR(255),
+        Bio TEXT,
+        Avatar_Url LONGTEXT,
+        Preferences_Json TEXT,
         Total_Donated DECIMAL(20, 2) DEFAULT 0,
         Wallet_Address VARCHAR(255)
       )
     `);
+    try { await mysqlPool.query(`ALTER TABLE DONOR ADD COLUMN Name VARCHAR(255)`); } catch (_) {}
+    try { await mysqlPool.query(`ALTER TABLE DONOR ADD COLUMN Mobile_Number VARCHAR(50)`); } catch (_) {}
+    try { await mysqlPool.query(`ALTER TABLE DONOR ADD COLUMN Location VARCHAR(255)`); } catch (_) {}
+    try { await mysqlPool.query(`ALTER TABLE DONOR ADD COLUMN Bio TEXT`); } catch (_) {}
+    try { await mysqlPool.query(`ALTER TABLE DONOR ADD COLUMN Avatar_Url LONGTEXT`); } catch (_) {}
+    try { await mysqlPool.query(`ALTER TABLE DONOR ADD COLUMN Preferences_Json TEXT`); } catch (_) {}
 
     await mysqlPool.query(`
       CREATE TABLE IF NOT EXISTS CAMPAIGN (

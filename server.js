@@ -920,6 +920,7 @@ app.get('/api/auth/me', authenticateToken, async (req, res) => {
         title: user.Title || null,
         agency: user.Agency || null,
         preferences: user.Preferences_Json || null,
+        last_name_change_at: user.Last_Name_Change_At || null,
         wallet_address: user.Wallet_Address,
         verification_status: user.Verification_Status,
         sec_registration_no: user.Sec_Registration_No || null,
@@ -936,89 +937,100 @@ app.get('/api/auth/me', authenticateToken, async (req, res) => {
   }
 });
 
-// ── Routes: Comprehensive Profile Update (Donors, NGOs, Admins) ──
+// ── Routes: Simple & Practical Profile Update (Avatar Image, Display Name with 7-Day Cooldown) ──
 app.post('/api/auth/profile', authenticateToken, async (req, res) => {
   const { role, id } = req.user;
   const {
     name,
+    avatar_url,
     phone,
     location,
-    bio,
-    avatar_url,
-    website,
-    emergency_hotline,
-    gcash_number,
-    maya_number,
-    bank_details,
-    title,
-    agency,
-    preferences
+    bio
   } = req.body;
 
   try {
     if (role === 'donor') {
-      await db.query(
-        `UPDATE DONOR SET 
-          Name = ?, 
-          Mobile_Number = ?, 
-          Location = ?, 
-          Bio = ?, 
-          Avatar_Url = ?, 
-          Preferences_Json = ? 
-        WHERE Donor_ID = ?`,
-        [
-          (name || '').trim() || null,
-          (phone || '').trim() || null,
-          (location || '').trim() || null,
-          (bio || '').trim() || null,
-          avatar_url || null,
-          typeof preferences === 'object' ? JSON.stringify(preferences) : preferences || null,
-          id
-        ]
-      );
+      const [donorRows] = await db.query(`SELECT * FROM DONOR WHERE Donor_ID = ?`, [id]);
+      const currentDonor = donorRows[0] || {};
+      const currentName = (currentDonor.Name || '').trim();
+      const targetName = (name || '').trim();
+
+      let shouldUpdateNameTimestamp = false;
+      let newName = currentDonor.Name;
+
+      // Check if user is attempting to change their display name
+      if (targetName && targetName !== currentName && targetName !== currentDonor.Username) {
+        if (currentDonor.Last_Name_Change_At) {
+          const lastChange = new Date(currentDonor.Last_Name_Change_At).getTime();
+          const now = Date.now();
+          const cooldownMs = 7 * 24 * 60 * 60 * 1000; // 7 days cooldown
+          const remainingMs = cooldownMs - (now - lastChange);
+
+          if (remainingMs > 0) {
+            const remainingDays = Math.ceil(remainingMs / (24 * 60 * 60 * 1000));
+            return res.status(400).json({
+              error: `Display name can only be changed once every 7 days. You can change it again in ${remainingDays} day${remainingDays > 1 ? 's' : ''}.`
+            });
+          }
+        }
+        newName = targetName;
+        shouldUpdateNameTimestamp = true;
+      }
+
+      const targetAvatar = avatar_url !== undefined ? avatar_url : currentDonor.Avatar_Url;
+
+      if (shouldUpdateNameTimestamp) {
+        await db.query(
+          `UPDATE DONOR SET 
+            Name = ?, 
+            Avatar_Url = ?, 
+            Mobile_Number = COALESCE(?, Mobile_Number),
+            Location = COALESCE(?, Location),
+            Bio = COALESCE(?, Bio),
+            Last_Name_Change_At = CURRENT_TIMESTAMP 
+          WHERE Donor_ID = ?`,
+          [newName, targetAvatar, phone || null, location || null, bio || null, id]
+        );
+      } else {
+        await db.query(
+          `UPDATE DONOR SET 
+            Avatar_Url = ?,
+            Mobile_Number = COALESCE(?, Mobile_Number),
+            Location = COALESCE(?, Location),
+            Bio = COALESCE(?, Bio)
+          WHERE Donor_ID = ?`,
+          [targetAvatar, phone || null, location || null, bio || null, id]
+        );
+      }
     } else if (role === 'organization') {
       await db.query(
         `UPDATE ORGANIZATION SET 
-          Org_Name = ?, 
-          Mobile_Number = ?, 
-          Location = ?, 
-          Bio = ?, 
-          Avatar_Url = ?, 
-          Website = ?, 
-          Emergency_Hotline = ?, 
-          Gcash_Number = ?, 
-          Maya_Number = ?, 
-          Bank_Details = ? 
+          Org_Name = COALESCE(?, Org_Name), 
+          Avatar_Url = ?,
+          Mobile_Number = COALESCE(?, Mobile_Number),
+          Location = COALESCE(?, Location),
+          Bio = COALESCE(?, Bio)
         WHERE Org_ID = ?`,
         [
           (name || '').trim() || null,
+          avatar_url || null,
           (phone || '').trim() || null,
           (location || '').trim() || null,
           (bio || '').trim() || null,
-          avatar_url || null,
-          (website || '').trim() || null,
-          (emergency_hotline || '').trim() || null,
-          (gcash_number || '').trim() || null,
-          (maya_number || '').trim() || null,
-          typeof bank_details === 'object' ? JSON.stringify(bank_details) : bank_details || null,
           id
         ]
       );
     } else if (role === 'admin') {
       await db.query(
         `UPDATE ADMINISTRATOR SET 
-          Name = ?, 
-          Mobile_Number = ?, 
-          Title = ?, 
-          Agency = ?, 
-          Avatar_Url = ? 
+          Name = COALESCE(?, Name), 
+          Avatar_Url = ?,
+          Mobile_Number = COALESCE(?, Mobile_Number)
         WHERE Admin_ID = ?`,
         [
           (name || '').trim() || null,
-          (phone || '').trim() || null,
-          (title || '').trim() || null,
-          (agency || '').trim() || null,
           avatar_url || null,
+          (phone || '').trim() || null,
           id
         ]
       );

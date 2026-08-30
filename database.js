@@ -123,6 +123,7 @@ function initSqlite() {
         sqliteDb.run(`ALTER TABLE DONOR ADD COLUMN Bio TEXT`, () => {});
         sqliteDb.run(`ALTER TABLE DONOR ADD COLUMN Avatar_Url TEXT`, () => {});
         sqliteDb.run(`ALTER TABLE DONOR ADD COLUMN Preferences_Json TEXT`, () => {});
+        sqliteDb.run(`ALTER TABLE DONOR ADD COLUMN Last_Name_Change_At DATETIME`, () => {});
 
         sqliteDb.run(`ALTER TABLE ORGANIZATION ADD COLUMN Location TEXT`, () => {});
         sqliteDb.run(`ALTER TABLE ORGANIZATION ADD COLUMN Bio TEXT`, () => {});
@@ -357,6 +358,7 @@ async function initializeDatabase() {
     try { await mysqlPool.query(`ALTER TABLE DONOR ADD COLUMN Bio TEXT`); } catch (_) {}
     try { await mysqlPool.query(`ALTER TABLE DONOR ADD COLUMN Avatar_Url LONGTEXT`); } catch (_) {}
     try { await mysqlPool.query(`ALTER TABLE DONOR ADD COLUMN Preferences_Json TEXT`); } catch (_) {}
+    try { await mysqlPool.query(`ALTER TABLE DONOR ADD COLUMN Last_Name_Change_At DATETIME`); } catch (_) {}
 
     await mysqlPool.query(`
       CREATE TABLE IF NOT EXISTS CAMPAIGN (

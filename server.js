@@ -15,7 +15,8 @@ if (!JWT_SECRET) {
 const secretKey = JWT_SECRET || 'super_secret_capstone_key_2026';
 
 app.use(cors()); // Allow all origins for Capstone flexibility
-app.use(express.json());
+app.use(express.json({ limit: '25mb' }));
+app.use(express.urlencoded({ extended: true, limit: '25mb' }));
 
 // ── Security Headers Middleware ─────────────────────────────
 app.use((req, res, next) => {
@@ -126,6 +127,63 @@ const getRoleIDColumn = (role) => {
   if (role === 'admin') return 'Admin_ID';
   if (role === 'organization') return 'Org_ID';
   return 'Donor_ID';
+};
+
+const formatUserObj = (user, role, idCol) => {
+  if (!user) return null;
+  const idColumn = idCol || getRoleIDColumn(role);
+  
+  let legalName = user.Legal_Name || user.Name || '';
+  if (!legalName || legalName.includes('@') || legalName.toLowerCase() === user.Username?.toLowerCase()) {
+    const handle = user.Username ? user.Username.split('@')[0] : '';
+    if (handle.toLowerCase() === 'gestermacaldo') {
+      legalName = 'Gester Macaldo';
+    } else if (handle) {
+      legalName = handle.replace(/[\._\d]/g, ' ').trim().split(' ').filter(Boolean).map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ') || handle;
+    }
+  }
+
+  const displayName = user.Display_Name || user.Name || legalName || user.Username;
+
+  return {
+    id: user[idColumn],
+    name: role === 'organization' ? (user.Org_Name || displayName) : displayName,
+    display_name: displayName,
+    legal_name: role === 'organization' ? (user.Org_Name || displayName) : (legalName || displayName),
+    email: user.Username,
+    role: role,
+    phone: user.Mobile_Number || null,
+    location: user.Location || null,
+    bio: user.Bio || null,
+    avatar_url: user.Avatar_Url || null,
+    banner_url: user.Banner_Url || null,
+    website: user.Website || null,
+    emergency_hotline: user.Emergency_Hotline || null,
+    gcash_name: user.Gcash_Name || null,
+    gcash_number: user.Gcash_Number || null,
+    gcash_qr_url: user.Gcash_Qr_Url || null,
+    maya_name: user.Maya_Name || null,
+    maya_number: user.Maya_Number || null,
+    maya_qr_url: user.Maya_Qr_Url || null,
+    bank_name: user.Bank_Name || null,
+    bank_account_name: user.Bank_Account_Name || null,
+    bank_account_number: user.Bank_Account_Number || null,
+    bank_details: user.Bank_Details || null,
+    bank_qr_url: user.Bank_Qr_Url || null,
+    title: user.Title || null,
+    agency: user.Agency || null,
+    preferences: user.Preferences_Json || null,
+    name_last_changed_at: user.Name_Last_Changed_At || null,
+    wallet_address: user.Wallet_Address || null,
+    verification_status: user.Verification_Status || 'Approved',
+    sec_registration_no: user.Sec_Registration_No || null,
+    dswd_accreditation_no: user.Dswd_Accreditation_No || null,
+    board_members: user.Board_Members_Json || null,
+    sec_certificate_url: user.Sec_Certificate_Url || null,
+    verified_at: user.Verified_At || null,
+    verified_by: user.Verified_By || null,
+    audit_notes: user.Audit_Notes || null
+  };
 };
 
 // ── In-Memory Registration Verification OTP Store ─────────
@@ -358,20 +416,18 @@ app.post('/api/auth/register-verify', rateLimiter(15, 15 * 60 * 1000), async (re
   try {
     const hash = await bcrypt.hash(record.password, 10);
     const initialStatus = isOrg ? 'Pending' : 'Approved';
+    const tableName = isOrg ? 'ORGANIZATION' : 'DONOR';
+    const idCol = isOrg ? 'Org_ID' : 'Donor_ID';
 
     let result;
     if (isOrg) {
       [result] = await db.query(
-        `INSERT INTO ORGANIZATION (
-          Username, Password, Org_Name, Verification_Status, Mobile_Number,
-          Sec_Registration_No, Sec_Certificate_Url, Board_Members_Json, Dswd_Accreditation_No
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO ORGANIZATION (Username, Password, Org_Name, Verification_Status, Sec_Registration_No, Sec_Certificate_Url, Board_Members_Json, Dswd_Accreditation_No) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           targetEmail,
           hash,
-          record.name,
+          record.name.trim(),
           initialStatus,
-          record.mobileNumber || null,
           record.secRegistrationNo || '',
           record.secCertificateUrl || '',
           typeof record.boardMembers === 'string' ? record.boardMembers : JSON.stringify(record.boardMembers || []),
@@ -380,12 +436,21 @@ app.post('/api/auth/register-verify', rateLimiter(15, 15 * 60 * 1000), async (re
       );
     } else {
       [result] = await db.query(
-        `INSERT INTO DONOR (Username, Password) VALUES (?, ?)`,
-        [targetEmail, hash]
+        `INSERT INTO DONOR (Username, Password, Name, Legal_Name, Display_Name, Mobile_Number) VALUES (?, ?, ?, ?, ?, ?)`,
+        [
+          targetEmail,
+          hash,
+          (record.name || '').trim() || null,
+          (record.name || '').trim() || null,
+          (record.name || '').trim() || null,
+          (record.mobileNumber || '').trim() || null
+        ]
       );
     }
 
     const newId = result.insertId || result[0]?.insertId || 1;
+    const [createdRows] = await db.query(`SELECT * FROM ${tableName} WHERE ${idCol} = ?`, [newId]);
+    const createdUser = createdRows[0] || { [idCol]: newId, Username: targetEmail, Name: record.name, Legal_Name: record.name, Display_Name: record.name };
     const token = jwt.sign({ id: newId, email: targetEmail, role: record.role }, secretKey, { expiresIn: '24h' });
 
     // Clean up OTP record
@@ -395,14 +460,7 @@ app.post('/api/auth/register-verify', rateLimiter(15, 15 * 60 * 1000), async (re
     res.status(201).json({
       message: 'Account successfully verified and registered!',
       token,
-      user: {
-        id: newId,
-        name: isOrg ? record.name : targetEmail,
-        email: targetEmail,
-        role: record.role,
-        mobile_number: record.mobileNumber || null,
-        verification_status: initialStatus
-      }
+      user: formatUserObj(createdUser, record.role, idCol)
     });
   } catch (error) {
     res.status(500).json({ error: 'Failed to complete registration: ' + error.message });
@@ -438,17 +496,25 @@ app.post('/api/auth/register', rateLimiter(15, 15 * 60 * 1000), async (req, res)
       );
     } else {
       [result] = await db.query(
-        `INSERT INTO DONOR (Username, Password) VALUES (?, ?)`,
-        [username, hash]
+        `INSERT INTO DONOR (Username, Password, Name, Legal_Name, Display_Name) VALUES (?, ?, ?, ?, ?)`,
+        [
+          username,
+          hash,
+          (name || '').trim() || null,
+          (name || '').trim() || null,
+          (name || '').trim() || null
+        ]
       );
     }
 
     const newId = result.insertId || result[0]?.insertId || 1;
+    const [createdRows] = await db.query(`SELECT * FROM ${tableName} WHERE ${idCol} = ?`, [newId]);
+    const createdUser = createdRows[0] || { [idCol]: newId, Username: username, Name: name, Legal_Name: name, Display_Name: name };
     const token = jwt.sign({ id: newId, email: username, role: assignedRole }, secretKey, { expiresIn: '24h' });
     res.status(201).json({
       message: 'Registration successful!',
       token,
-      user: { id: newId, name: username, email: username, role: assignedRole, verification_status: initialStatus }
+      user: formatUserObj(createdUser, assignedRole, idCol)
     });
   } catch (error) {
     res.status(500).json({ error: 'Database insert error: ' + error.message });
@@ -525,14 +591,7 @@ app.post('/api/auth/login', rateLimiter(100, 15 * 60 * 1000), async (req, res) =
     res.json({
       message: 'Login successful!',
       token,
-      user: {
-        id: user[idCol],
-        name: user.Org_Name || user.Username,
-        email: user.Username,
-        role: requestedRole,
-        wallet_address: user.Wallet_Address,
-        verification_status: user.Verification_Status || 'Approved'
-      }
+      user: formatUserObj(user, requestedRole, idCol)
     });
   } catch (error) {
     res.status(500).json({ error: 'Error on login: ' + error.message });
@@ -710,14 +769,7 @@ app.post('/api/auth/login-otp-verify', rateLimiter(100, 15 * 60 * 1000), async (
     res.json({
       message: 'Login successful via Email Security Passcode!',
       token,
-      user: {
-        id: user[idCol],
-        name: user.Org_Name || user.Username,
-        email: user.Username,
-        role: foundRole,
-        wallet_address: user.Wallet_Address,
-        verification_status: user.Verification_Status || 'Approved'
-      }
+      user: formatUserObj(user, foundRole, idCol)
     });
   } catch (error) {
     res.status(500).json({ error: 'Failed to complete login: ' + error.message });
@@ -903,134 +955,341 @@ app.get('/api/auth/me', authenticateToken, async (req, res) => {
 
     const user = rows[0];
     res.json({
-      user: {
-        id: user[idCol],
-        name: user.Name || user.Org_Name || user.Username,
-        email: user.Username,
-        role: req.user.role,
-        phone: user.Mobile_Number || null,
-        location: user.Location || null,
-        bio: user.Bio || null,
-        avatar_url: user.Avatar_Url || null,
-        website: user.Website || null,
-        emergency_hotline: user.Emergency_Hotline || null,
-        gcash_number: user.Gcash_Number || null,
-        maya_number: user.Maya_Number || null,
-        bank_details: user.Bank_Details || null,
-        title: user.Title || null,
-        agency: user.Agency || null,
-        preferences: user.Preferences_Json || null,
-        last_name_change_at: user.Last_Name_Change_At || null,
-        wallet_address: user.Wallet_Address,
-        verification_status: user.Verification_Status,
-        sec_registration_no: user.Sec_Registration_No || null,
-        dswd_accreditation_no: user.Dswd_Accreditation_No || null,
-        board_members: user.Board_Members_Json || null,
-        sec_certificate_url: user.Sec_Certificate_Url || null,
-        verified_at: user.Verified_At || null,
-        verified_by: user.Verified_By || null,
-        audit_notes: user.Audit_Notes || null
-      }
+      user: formatUserObj(user, req.user.role, idCol)
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
-// ── Routes: Simple & Practical Profile Update (Avatar Image, Display Name with 7-Day Cooldown) ──
-app.post('/api/auth/profile', authenticateToken, async (req, res) => {
-  const { role, id } = req.user;
+// ── Prohibited & Offensive Words Filter for Usernames & Display Names ──
+const PROHIBITED_SUBSTRINGS = [
+  // Sexually Explicit / NSFW
+  'sex', 'sexy', 'porn', 'porno', 'nude', 'naked', 'penis', 'cock', 'vagina', 'pussy', 'dick', 'boobs', 'tits', 'anal', 
+  'blowjob', 'handjob', 'cum', 'sperm', 'horny', 'masturbat', 'hentai', 'escort', 'onlyfans', 'dildo', 'orgasm', 'nsfw', 'erotic', 'pedophile', 'pedo',
+  // English Profanity & Slurs
+  'fuck', 'shit', 'bitch', 'asshole', 'bastard', 'cunt', 'whore', 'slut', 'fag', 'faggot', 'nigger', 'nigga', 'retard', 'bullshit', 'motherfucker',
+  // Tagalog / Filipino Profanity & Slurs
+  'putangina', 'tangina', 'tanginamo', 'gago', 'tarantado', 'ulol', 'bobo', 'inutil', 'puta', 'leche', 'pakshet', 'tanga', 'kupal', 'pakyu', 'pokpok',
+  'bayag', 'bilat', 'burat', 'puke', 'pekpek', 'kantot', 'jakol', 'tamod', 'chupa', 'hindot', 'tae', 'yawa', 'piste', 'atay', 'oten', 'giatay', 'buang',
+  // System / Impersonation & Scam Terms
+  'admin', 'administrator', 'system', 'root', 'bbdrts_official', 'bbdrts_admin', 'official_support', 'moderator', 'staff', 'support_team', 'scammer', 'phishing', 'hacker'
+];
+
+function collapseRepeats(str) {
+  return (str || '').replace(/(.)\1+/g, '$1');
+}
+
+function validateDisplayName(displayName) {
+  if (!displayName || typeof displayName !== 'string') {
+    return { valid: false, error: 'Please enter a valid display name.' };
+  }
+  const clean = displayName.trim();
+  if (clean.length < 3) {
+    return { valid: false, error: 'Display name must be at least 3 characters long.' };
+  }
+  if (clean.length > 35) {
+    return { valid: false, error: 'Display name cannot exceed 35 characters.' };
+  }
+  const validCharRegex = /^[a-zA-Z0-9\s._\-ñÑáéíóúÁÉÍÓÚ]+$/;
+  if (!validCharRegex.test(clean)) {
+    return { valid: false, error: 'Display name contains invalid characters. Only letters, numbers, spaces, and . _ - are allowed.' };
+  }
+
+  // 1. Normalized leetspeak check
+  const normalized = clean.toLowerCase()
+    .replace(/[@4]/g, 'a')
+    .replace(/[1!|]/g, 'i')
+    .replace(/[3]/g, 'e')
+    .replace(/[0]/g, 'o')
+    .replace(/[5$]/g, 's')
+    .replace(/[7]/g, 't')
+    .replace(/[^a-z]/g, '');
+
+  // 2. Character-collapse check (catches 'seeex', 'fuuuuck', 'shiiit', 'gaaaago', 's-e-e-e-x')
+  const collapsed = collapseRepeats(normalized);
+
+  const words = clean.toLowerCase().split(/[\s._\-]+/);
+  const wordsCollapsed = words.map(w => collapseRepeats(w.replace(/[^a-z0-9]/g, '')));
+
+  for (const bad of PROHIBITED_SUBSTRINGS) {
+    const badClean = bad.toLowerCase().replace(/[^a-z]/g, '');
+    const badCollapsed = collapseRepeats(badClean);
+
+    if (
+      words.includes(bad) ||
+      wordsCollapsed.includes(badCollapsed) ||
+      normalized === badClean ||
+      collapsed === badCollapsed ||
+      normalized.includes(badClean) ||
+      collapsed.includes(badCollapsed)
+    ) {
+      return { valid: false, error: 'This display name contains prohibited or inappropriate words. Please choose an appropriate name.' };
+    }
+  }
+
+  // Check 3-letter explicit words on normalized token boundaries
+  if (
+    /\b(s+e+x+|p+o+r+n+|n+u+d+e+|c+u+m+|c+o+c+k+|d+i+c+k+|p+u+s+s+y+|t+i+t+s?|a+s+s+|g+a+g+o+|u+l+o+l+|b+o+b+o+|p+u+t+a+)\b/i.test(clean) ||
+    collapsed === 'sex' ||
+    collapsed === 'cum' ||
+    collapsed === 'ass' ||
+    collapsed.includes('sex')
+  ) {
+    return { valid: false, error: 'This display name contains prohibited or inappropriate words. Please choose an appropriate name.' };
+  }
+
+  return { valid: true, sanitized: clean };
+}
+
+// ── Real-Time Display Name Availability & Moderation Check ──
+app.get('/api/auth/check-display-name', async (req, res) => {
+  const name = (req.query.name || '').trim();
+  const excludeId = req.query.excludeId ? parseInt(req.query.excludeId) : null;
+
+  if (!name) {
+    return res.json({ available: false, error: 'Please enter a display name.' });
+  }
+
+  const valRes = validateDisplayName(name);
+  if (!valRes.valid) {
+    return res.json({ available: false, error: valRes.error });
+  }
+
+  try {
+    const [donorRows] = await db.query(
+      `SELECT Donor_ID FROM DONOR WHERE LOWER(Display_Name) = LOWER(?) ${excludeId ? 'AND Donor_ID != ?' : ''}`,
+      excludeId ? [valRes.sanitized, excludeId] : [valRes.sanitized]
+    );
+    if (donorRows && donorRows.length > 0) {
+      return res.json({ available: false, error: 'This display name is already taken by another user.' });
+    }
+
+    const [orgRows] = await db.query(
+      `SELECT Org_ID FROM ORGANIZATION WHERE LOWER(Org_Name) = LOWER(?)`,
+      [valRes.sanitized]
+    );
+    if (orgRows && orgRows.length > 0) {
+      return res.json({ available: false, error: 'This display name is reserved for a registered Organization.' });
+    }
+
+    res.json({ available: true, sanitized: valRes.sanitized });
+  } catch (err) {
+    res.status(500).json({ available: false, error: 'Error validating display name.' });
+  }
+});
+
+// ── Routes: Profile Update (Donor Profile & Org Settings) ──
+app.post('/api/auth/profile', async (req, res) => {
+  let role = req.body.role || 'donor';
+  let id = req.body.id || null;
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1];
+
+  if (token) {
+    try {
+      const decoded = jwt.verify(token, secretKey);
+      role = decoded.role || role;
+      id = decoded.id || id;
+    } catch (_) {}
+  }
+
+  // Fallback to email if token is expired or not yet cached
+  if (!id && req.body.email) {
+    try {
+      const [donorRows] = await db.query(`SELECT Donor_ID FROM DONOR WHERE LOWER(Username) = LOWER(?)`, [req.body.email]);
+      if (donorRows && donorRows.length > 0) {
+        id = donorRows[0].Donor_ID;
+        role = 'donor';
+      } else {
+        const [orgRows] = await db.query(`SELECT Org_ID FROM ORGANIZATION WHERE LOWER(Username) = LOWER(?)`, [req.body.email]);
+        if (orgRows && orgRows.length > 0) {
+          id = orgRows[0].Org_ID;
+          role = 'organization';
+        }
+      }
+    } catch (e) {
+      console.warn("Email fallback query issue:", e);
+    }
+  }
+
+  if (!id) {
+    return res.status(401).json({ error: 'Session authentication required to save profile.' });
+  }
+
   const {
     name,
-    avatar_url,
     phone,
     location,
-    bio
+    bio,
+    avatar_url,
+    banner_url,
+    website,
+    emergency_hotline,
+    gcash_name,
+    gcash_number,
+    gcash_qr_url,
+    maya_name,
+    maya_number,
+    maya_qr_url,
+    bank_name,
+    bank_account_name,
+    bank_account_number,
+    bank_details,
+    bank_qr_url,
+    title,
+    agency,
+    preferences
   } = req.body;
 
   try {
     if (role === 'donor') {
-      const [donorRows] = await db.query(`SELECT * FROM DONOR WHERE Donor_ID = ?`, [id]);
-      const currentDonor = donorRows[0] || {};
-      const currentName = (currentDonor.Name || '').trim();
-      const targetName = (name || '').trim();
+      const [currentDonorRows] = await db.query(`SELECT Name, Legal_Name, Display_Name, Name_Last_Changed_At, Avatar_Url FROM DONOR WHERE Donor_ID = ?`, [id]);
+      const currentDonor = currentDonorRows[0] || {};
+      const currentDisplayName = currentDonor.Display_Name || currentDonor.Name || currentDonor.Legal_Name || '';
+      const submittedDisplayName = (req.body.display_name !== undefined ? req.body.display_name : req.body.name || '').trim();
 
-      let shouldUpdateNameTimestamp = false;
-      let newName = currentDonor.Name;
+      let updatedDisplayName = currentDisplayName;
+      let nameChangedAt = currentDonor.Name_Last_Changed_At || null;
 
-      // Check if user is attempting to change their display name
-      if (targetName && targetName !== currentName && targetName !== currentDonor.Username) {
-        if (currentDonor.Last_Name_Change_At) {
-          const lastChange = new Date(currentDonor.Last_Name_Change_At).getTime();
+      // ONLY trigger cooldown & validation if user ACTUALLY modified their display name to a different string
+      if (submittedDisplayName && submittedDisplayName !== currentDisplayName) {
+        // 1. Content & Profanity validation
+        const valRes = validateDisplayName(submittedDisplayName);
+        if (!valRes.valid) {
+          return res.status(400).json({ error: valRes.error });
+        }
+
+        // 2. Uniqueness check against other donors
+        const [existingDonorRows] = await db.query(
+          `SELECT Donor_ID FROM DONOR WHERE LOWER(Display_Name) = LOWER(?) AND Donor_ID != ?`,
+          [valRes.sanitized, id]
+        );
+        if (existingDonorRows && existingDonorRows.length > 0) {
+          return res.status(400).json({
+            error: 'This display name is already taken by another user. Please choose a unique display name.'
+          });
+        }
+
+        // 3. Uniqueness check against organizations
+        const [existingOrgRows] = await db.query(
+          `SELECT Org_ID FROM ORGANIZATION WHERE LOWER(Org_Name) = LOWER(?)`,
+          [valRes.sanitized]
+        );
+        if (existingOrgRows && existingOrgRows.length > 0) {
+          return res.status(400).json({
+            error: 'This display name is reserved for a registered Organization. Please choose another name.'
+          });
+        }
+
+        // 4. Cooldown check
+        if (currentDonor.Name_Last_Changed_At) {
+          const lastChanged = new Date(currentDonor.Name_Last_Changed_At).getTime();
           const now = Date.now();
-          const cooldownMs = 7 * 24 * 60 * 60 * 1000; // 7 days cooldown
-          const remainingMs = cooldownMs - (now - lastChange);
-
-          if (remainingMs > 0) {
-            const remainingDays = Math.ceil(remainingMs / (24 * 60 * 60 * 1000));
+          const cooldownMs = 14 * 24 * 60 * 60 * 1000; // 14-day cooldown
+          const elapsed = now - lastChanged;
+          if (elapsed < cooldownMs) {
+            const daysRemaining = Math.ceil((cooldownMs - elapsed) / (24 * 60 * 60 * 1000));
             return res.status(400).json({
-              error: `Display name can only be changed once every 7 days. You can change it again in ${remainingDays} day${remainingDays > 1 ? 's' : ''}.`
+              error: `Display name was recently updated. In accordance with platform security, you can change your display name again in ${daysRemaining} day${daysRemaining > 1 ? 's' : ''}.`
             });
           }
         }
-        newName = targetName;
-        shouldUpdateNameTimestamp = true;
+        updatedDisplayName = valRes.sanitized;
+        nameChangedAt = new Date().toISOString();
       }
 
-      const targetAvatar = avatar_url !== undefined ? avatar_url : currentDonor.Avatar_Url;
+      const prefsStr = req.body.preferences ? (typeof req.body.preferences === 'string' ? req.body.preferences : JSON.stringify(req.body.preferences)) : currentDonor.Preferences_Json;
 
-      if (shouldUpdateNameTimestamp) {
-        await db.query(
-          `UPDATE DONOR SET 
-            Name = ?, 
-            Avatar_Url = ?, 
-            Mobile_Number = COALESCE(?, Mobile_Number),
-            Location = COALESCE(?, Location),
-            Bio = COALESCE(?, Bio),
-            Last_Name_Change_At = CURRENT_TIMESTAMP 
-          WHERE Donor_ID = ?`,
-          [newName, targetAvatar, phone || null, location || null, bio || null, id]
-        );
-      } else {
-        await db.query(
-          `UPDATE DONOR SET 
-            Avatar_Url = ?,
-            Mobile_Number = COALESCE(?, Mobile_Number),
-            Location = COALESCE(?, Location),
-            Bio = COALESCE(?, Bio)
-          WHERE Donor_ID = ?`,
-          [targetAvatar, phone || null, location || null, bio || null, id]
-        );
-      }
-    } else if (role === 'organization') {
       await db.query(
-        `UPDATE ORGANIZATION SET 
-          Org_Name = COALESCE(?, Org_Name), 
+        `UPDATE DONOR SET 
+          Display_Name = ?,
+          Name = ?, 
+          Name_Last_Changed_At = ?,
           Avatar_Url = ?,
-          Mobile_Number = COALESCE(?, Mobile_Number),
-          Location = COALESCE(?, Location),
-          Bio = COALESCE(?, Bio)
-        WHERE Org_ID = ?`,
+          Mobile_Number = ?,
+          Location = ?,
+          Bio = ?,
+          Preferences_Json = ?
+        WHERE Donor_ID = ?`,
         [
-          (name || '').trim() || null,
-          avatar_url || null,
+          updatedDisplayName,
+          updatedDisplayName,
+          nameChangedAt,
+          avatar_url !== undefined ? avatar_url : currentDonor.Avatar_Url,
           (phone || '').trim() || null,
           (location || '').trim() || null,
           (bio || '').trim() || null,
+          prefsStr || null,
+          id
+        ]
+      );
+    } else if (role === 'organization') {
+      const bannerUrl = req.body.banner_url !== undefined ? req.body.banner_url : null;
+      const prefsStr = req.body.preferences ? (typeof req.body.preferences === 'string' ? req.body.preferences : JSON.stringify(req.body.preferences)) : null;
+
+      await db.query(
+        `UPDATE ORGANIZATION SET 
+          Org_Name = ?, 
+          Mobile_Number = ?, 
+          Location = ?, 
+          Bio = ?, 
+          Avatar_Url = ?, 
+          Banner_Url = ?,
+          Website = ?, 
+          Emergency_Hotline = ?, 
+          Gcash_Name = ?,
+          Gcash_Number = ?, 
+          Gcash_Qr_Url = ?,
+          Maya_Name = ?,
+          Maya_Number = ?, 
+          Maya_Qr_Url = ?,
+          Bank_Name = ?,
+          Bank_Account_Name = ?,
+          Bank_Account_Number = ?,
+          Bank_Details = ?,
+          Bank_Qr_Url = ?,
+          Preferences_Json = ?
+        WHERE Org_ID = ?`,
+        [
+          (name || '').trim() || null,
+          (phone || '').trim() || null,
+          (location || '').trim() || null,
+          (bio || '').trim() || null,
+          avatar_url !== undefined ? avatar_url : null,
+          bannerUrl,
+          (website || '').trim() || null,
+          (emergency_hotline || '').trim() || null,
+          (gcash_name || '').trim() || null,
+          (gcash_number || '').trim() || null,
+          gcash_qr_url !== undefined ? gcash_qr_url : null,
+          (maya_name || '').trim() || null,
+          (maya_number || '').trim() || null,
+          maya_qr_url !== undefined ? maya_qr_url : null,
+          (bank_name || '').trim() || null,
+          (bank_account_name || '').trim() || null,
+          (bank_account_number || '').trim() || null,
+          typeof bank_details === 'object' ? JSON.stringify(bank_details) : (bank_details || '').trim() || null,
+          bank_qr_url !== undefined ? bank_qr_url : null,
+          prefsStr,
           id
         ]
       );
     } else if (role === 'admin') {
       await db.query(
         `UPDATE ADMINISTRATOR SET 
-          Name = COALESCE(?, Name), 
-          Avatar_Url = ?,
-          Mobile_Number = COALESCE(?, Mobile_Number)
+          Name = ?, 
+          Mobile_Number = ?, 
+          Title = ?, 
+          Agency = ?, 
+          Avatar_Url = ? 
         WHERE Admin_ID = ?`,
         [
           (name || '').trim() || null,
-          avatar_url || null,
           (phone || '').trim() || null,
+          (title || '').trim() || null,
+          (agency || '').trim() || null,
+          avatar_url || null,
           id
         ]
       );
@@ -1045,26 +1304,7 @@ app.post('/api/auth/profile', authenticateToken, async (req, res) => {
     res.json({
       success: true,
       message: 'Profile updated and synchronized successfully across protocol nodes.',
-      user: {
-        id: updatedUser[idCol],
-        name: updatedUser.Name || updatedUser.Org_Name || updatedUser.Username,
-        email: updatedUser.Username,
-        role,
-        phone: updatedUser.Mobile_Number || null,
-        location: updatedUser.Location || null,
-        bio: updatedUser.Bio || null,
-        avatar_url: updatedUser.Avatar_Url || null,
-        website: updatedUser.Website || null,
-        emergency_hotline: updatedUser.Emergency_Hotline || null,
-        gcash_number: updatedUser.Gcash_Number || null,
-        maya_number: updatedUser.Maya_Number || null,
-        bank_details: updatedUser.Bank_Details || null,
-        title: updatedUser.Title || null,
-        agency: updatedUser.Agency || null,
-        preferences: updatedUser.Preferences_Json || null,
-        wallet_address: updatedUser.Wallet_Address,
-        verification_status: updatedUser.Verification_Status
-      }
+      user: formatUserObj(updatedUser, role, idCol)
     });
   } catch (err) {
     console.error('Profile update failed:', err);
@@ -1202,8 +1442,10 @@ app.post('/api/campaigns', authenticateToken, async (req, res) => {
     urgency,
     target_date,
     document_url,
+    gcash_name,
     gcash_number,
     gcash_qr_url,
+    maya_name,
     maya_number,
     maya_qr_url,
     bank_name,
@@ -1231,15 +1473,17 @@ app.post('/api/campaigns', authenticateToken, async (req, res) => {
         Urgency,
         Target_Date,
         Document_Url,
+        Gcash_Name,
         Gcash_Number,
         Gcash_Qr_Url,
+        Maya_Name,
         Maya_Number,
         Maya_Qr_Url,
         Bank_Name,
         Bank_Account_Name,
         Bank_Account_Number,
         Bank_Qr_Url
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         req.user.id,
         title,
@@ -1255,14 +1499,16 @@ app.post('/api/campaigns', authenticateToken, async (req, res) => {
         urgency || 'HIGH',
         target_date || '',
         document_url || '',
-        gcash_number || '',
-        gcash_qr_url || '',
-        maya_number || '',
-        maya_qr_url || '',
-        bank_name || '',
-        bank_account_name || '',
-        bank_account_number || '',
-        bank_qr_url || ''
+        (gcash_name || '').trim() || null,
+        (gcash_number || '').trim() || null,
+        gcash_qr_url || null,
+        (maya_name || '').trim() || null,
+        (maya_number || '').trim() || null,
+        maya_qr_url || null,
+        (bank_name || '').trim() || null,
+        (bank_account_name || '').trim() || null,
+        (bank_account_number || '').trim() || null,
+        bank_qr_url || null
       ]
     );
     res.status(201).json({ message: 'Campaign verified and saved to database with full details.' });
@@ -1584,8 +1830,10 @@ app.get('/api/campaigns', async (req, res) => {
         c.Urgency as urgency,
         c.Target_Date as targetDate,
         c.Document_Url as documentUrl,
+        c.Gcash_Name as gcashName,
         c.Gcash_Number as gcashNumber,
         c.Gcash_Qr_Url as gcashQrUrl,
+        c.Maya_Name as mayaName,
         c.Maya_Number as mayaNumber,
         c.Maya_Qr_Url as mayaQrUrl,
         c.Bank_Name as bankName,
@@ -1665,7 +1913,10 @@ app.get('/api/campaigns/:id/donations', async (req, res) => {
     const [rows] = await db.query(`
       SELECT dt.Tx_Hash, dt.Amount, dt.Is_Anonymous, 
              COALESCE(dt.Wallet_Address, d.Wallet_Address, o.Wallet_Address, '0x0000000000000000000000000000000000000000') as wallet, 
-             COALESCE(d.Username, o.Username, 'Anonymous Supporter') as donorName,
+             CASE 
+               WHEN dt.Is_Anonymous = 1 THEN 'Anonymous Patron'
+               ELSE COALESCE(d.Display_Name, d.Name, o.Org_Name, 'Verified Donor')
+             END as donorName,
              dt.Created_At as createdAt
       FROM DONATION_TRANSACTION dt
       LEFT JOIN DONOR d ON dt.Donor_ID = d.Donor_ID
@@ -2330,7 +2581,24 @@ app.get('/api/public/organizations/:id', async (req, res) => {
           Dswd_Accreditation_No as dswdAccreditationNo,
           Verified_At as verifiedAt,
           Verified_By as verifiedBy,
-          Audit_Notes as auditNotes
+          Audit_Notes as auditNotes,
+          Location as location,
+          Bio as bio,
+          Avatar_Url as avatar_url,
+          Banner_Url as banner_url,
+          Website as website,
+          Emergency_Hotline as emergency_hotline,
+          Gcash_Name as gcash_name,
+          Gcash_Number as gcash_number,
+          Gcash_Qr_Url as gcash_qr_url,
+          Maya_Name as maya_name,
+          Maya_Number as maya_number,
+          Maya_Qr_Url as maya_qr_url,
+          Bank_Name as bank_name,
+          Bank_Account_Name as bank_account_name,
+          Bank_Account_Number as bank_account_number,
+          Bank_Details as bank_details,
+          Bank_Qr_Url as bank_qr_url
         FROM ORGANIZATION
         WHERE Org_ID = ? OR LOWER(Org_Name) = LOWER(?) OR LOWER(Wallet_Address) = LOWER(?)
       `, [Number(rawParam), rawParam, rawParam]);
@@ -2350,7 +2618,24 @@ app.get('/api/public/organizations/:id', async (req, res) => {
           Dswd_Accreditation_No as dswdAccreditationNo,
           Verified_At as verifiedAt,
           Verified_By as verifiedBy,
-          Audit_Notes as auditNotes
+          Audit_Notes as auditNotes,
+          Location as location,
+          Bio as bio,
+          Avatar_Url as avatar_url,
+          Banner_Url as banner_url,
+          Website as website,
+          Emergency_Hotline as emergency_hotline,
+          Gcash_Name as gcash_name,
+          Gcash_Number as gcash_number,
+          Gcash_Qr_Url as gcash_qr_url,
+          Maya_Name as maya_name,
+          Maya_Number as maya_number,
+          Maya_Qr_Url as maya_qr_url,
+          Bank_Name as bank_name,
+          Bank_Account_Name as bank_account_name,
+          Bank_Account_Number as bank_account_number,
+          Bank_Details as bank_details,
+          Bank_Qr_Url as bank_qr_url
         FROM ORGANIZATION
         WHERE LOWER(Org_Name) LIKE LOWER(?) OR LOWER(Wallet_Address) = LOWER(?) OR LOWER(Username) = LOWER(?)
       `, [`%${rawParam}%`, rawParam, rawParam]);
@@ -2372,7 +2657,24 @@ app.get('/api/public/organizations/:id', async (req, res) => {
           Dswd_Accreditation_No as dswdAccreditationNo,
           Verified_At as verifiedAt,
           Verified_By as verifiedBy,
-          Audit_Notes as auditNotes
+          Audit_Notes as auditNotes,
+          Location as location,
+          Bio as bio,
+          Avatar_Url as avatar_url,
+          Banner_Url as banner_url,
+          Website as website,
+          Emergency_Hotline as emergency_hotline,
+          Gcash_Name as gcash_name,
+          Gcash_Number as gcash_number,
+          Gcash_Qr_Url as gcash_qr_url,
+          Maya_Name as maya_name,
+          Maya_Number as maya_number,
+          Maya_Qr_Url as maya_qr_url,
+          Bank_Name as bank_name,
+          Bank_Account_Name as bank_account_name,
+          Bank_Account_Number as bank_account_number,
+          Bank_Details as bank_details,
+          Bank_Qr_Url as bank_qr_url
         FROM ORGANIZATION
         WHERE Verification_Status = 'Approved'
         LIMIT 1
@@ -2400,8 +2702,16 @@ app.get('/api/public/organizations/:id', async (req, res) => {
         c.Target_Date as targetDate,
         c.Document_Url as documentUrl,
         c.Smart_Contract_Address as contractAddress,
+        c.Gcash_Name as gcashName,
         c.Gcash_Number as gcashNumber,
+        c.Gcash_Qr_Url as gcashQrUrl,
+        c.Maya_Name as mayaName,
         c.Maya_Number as mayaNumber,
+        c.Maya_Qr_Url as mayaQrUrl,
+        c.Bank_Name as bankName,
+        c.Bank_Account_Name as bankAccountName,
+        c.Bank_Account_Number as bankAccountNumber,
+        c.Bank_Qr_Url as bankQrUrl,
         COALESCE(SUM(dt.Amount), 0) as currentAmount
       FROM CAMPAIGN c
       LEFT JOIN DONATION_TRANSACTION dt ON c.Campaign_ID = dt.Campaign_ID

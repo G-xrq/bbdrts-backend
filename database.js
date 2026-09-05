@@ -106,6 +106,24 @@ function initSqlite() {
         sqliteDb.run(`ALTER TABLE ORGANIZATION ADD COLUMN Verified_At DATETIME`, () => {});
         sqliteDb.run(`ALTER TABLE ORGANIZATION ADD COLUMN Verified_By TEXT`, () => {});
         sqliteDb.run(`ALTER TABLE ORGANIZATION ADD COLUMN Audit_Notes TEXT`, () => {});
+        sqliteDb.run(`ALTER TABLE ORGANIZATION ADD COLUMN Banner_Url TEXT`, () => {});
+        sqliteDb.run(`ALTER TABLE ORGANIZATION ADD COLUMN Preferences_Json TEXT`, () => {});
+        sqliteDb.run(`ALTER TABLE ORGANIZATION ADD COLUMN Location TEXT`, () => {});
+        sqliteDb.run(`ALTER TABLE ORGANIZATION ADD COLUMN Bio TEXT`, () => {});
+        sqliteDb.run(`ALTER TABLE ORGANIZATION ADD COLUMN Avatar_Url TEXT`, () => {});
+        sqliteDb.run(`ALTER TABLE ORGANIZATION ADD COLUMN Website TEXT`, () => {});
+        sqliteDb.run(`ALTER TABLE ORGANIZATION ADD COLUMN Emergency_Hotline TEXT`, () => {});
+        sqliteDb.run(`ALTER TABLE ORGANIZATION ADD COLUMN Gcash_Name TEXT`, () => {});
+        sqliteDb.run(`ALTER TABLE ORGANIZATION ADD COLUMN Gcash_Number TEXT`, () => {});
+        sqliteDb.run(`ALTER TABLE ORGANIZATION ADD COLUMN Gcash_Qr_Url TEXT`, () => {});
+        sqliteDb.run(`ALTER TABLE ORGANIZATION ADD COLUMN Maya_Name TEXT`, () => {});
+        sqliteDb.run(`ALTER TABLE ORGANIZATION ADD COLUMN Maya_Number TEXT`, () => {});
+        sqliteDb.run(`ALTER TABLE ORGANIZATION ADD COLUMN Maya_Qr_Url TEXT`, () => {});
+        sqliteDb.run(`ALTER TABLE ORGANIZATION ADD COLUMN Bank_Name TEXT`, () => {});
+        sqliteDb.run(`ALTER TABLE ORGANIZATION ADD COLUMN Bank_Account_Name TEXT`, () => {});
+        sqliteDb.run(`ALTER TABLE ORGANIZATION ADD COLUMN Bank_Account_Number TEXT`, () => {});
+        sqliteDb.run(`ALTER TABLE ORGANIZATION ADD COLUMN Bank_Details TEXT`, () => {});
+        sqliteDb.run(`ALTER TABLE ORGANIZATION ADD COLUMN Bank_Qr_Url TEXT`, () => {});
 
         sqliteDb.run(`
           CREATE TABLE IF NOT EXISTS DONOR (
@@ -118,12 +136,28 @@ function initSqlite() {
         `);
 
         sqliteDb.run(`ALTER TABLE DONOR ADD COLUMN Name TEXT`, () => {});
+        sqliteDb.run(`ALTER TABLE DONOR ADD COLUMN Legal_Name TEXT`, () => {});
+        sqliteDb.run(`ALTER TABLE DONOR ADD COLUMN Display_Name TEXT`, () => {});
         sqliteDb.run(`ALTER TABLE DONOR ADD COLUMN Mobile_Number TEXT`, () => {});
         sqliteDb.run(`ALTER TABLE DONOR ADD COLUMN Location TEXT`, () => {});
         sqliteDb.run(`ALTER TABLE DONOR ADD COLUMN Bio TEXT`, () => {});
         sqliteDb.run(`ALTER TABLE DONOR ADD COLUMN Avatar_Url TEXT`, () => {});
         sqliteDb.run(`ALTER TABLE DONOR ADD COLUMN Preferences_Json TEXT`, () => {});
-        sqliteDb.run(`ALTER TABLE DONOR ADD COLUMN Last_Name_Change_At DATETIME`, () => {});
+        sqliteDb.run(`ALTER TABLE DONOR ADD COLUMN Name_Last_Changed_At DATETIME`, () => {});
+
+        // Backfill existing donors where Legal_Name is NULL
+        sqliteDb.all(`SELECT Donor_ID, Username, Name FROM DONOR WHERE Legal_Name IS NULL`, [], (err, rows) => {
+          if (!err && rows && rows.length > 0) {
+            rows.forEach((row) => {
+              const handle = row.Username ? row.Username.split('@')[0] : 'Donor';
+              let formatted = handle.toLowerCase() === 'gestermacaldo'
+                ? 'Gester Macaldo'
+                : handle.replace(/[\._\d]/g, ' ').trim().split(' ').filter(Boolean).map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ') || handle;
+              const val = row.Name && !row.Name.includes('@') ? row.Name : formatted;
+              sqliteDb.run(`UPDATE DONOR SET Legal_Name = ?, Display_Name = COALESCE(Display_Name, ?), Name = COALESCE(Name, ?) WHERE Donor_ID = ?`, [val, val, val, row.Donor_ID]);
+            });
+          }
+        });
 
         sqliteDb.run(`ALTER TABLE ORGANIZATION ADD COLUMN Location TEXT`, () => {});
         sqliteDb.run(`ALTER TABLE ORGANIZATION ADD COLUMN Bio TEXT`, () => {});
@@ -157,8 +191,10 @@ function initSqlite() {
             Urgency TEXT,
             Target_Date TEXT,
             Document_Url TEXT,
+            Gcash_Name TEXT,
             Gcash_Number TEXT,
             Gcash_Qr_Url TEXT,
+            Maya_Name TEXT,
             Maya_Number TEXT,
             Maya_Qr_Url TEXT,
             Bank_Name TEXT,
@@ -180,8 +216,10 @@ function initSqlite() {
         sqliteDb.run(`ALTER TABLE CAMPAIGN ADD COLUMN Urgency TEXT`, () => {});
         sqliteDb.run(`ALTER TABLE CAMPAIGN ADD COLUMN Target_Date TEXT`, () => {});
         sqliteDb.run(`ALTER TABLE CAMPAIGN ADD COLUMN Document_Url TEXT`, () => {});
+        sqliteDb.run(`ALTER TABLE CAMPAIGN ADD COLUMN Gcash_Name TEXT`, () => {});
         sqliteDb.run(`ALTER TABLE CAMPAIGN ADD COLUMN Gcash_Number TEXT`, () => {});
         sqliteDb.run(`ALTER TABLE CAMPAIGN ADD COLUMN Gcash_Qr_Url TEXT`, () => {});
+        sqliteDb.run(`ALTER TABLE CAMPAIGN ADD COLUMN Maya_Name TEXT`, () => {});
         sqliteDb.run(`ALTER TABLE CAMPAIGN ADD COLUMN Maya_Number TEXT`, () => {});
         sqliteDb.run(`ALTER TABLE CAMPAIGN ADD COLUMN Maya_Qr_Url TEXT`, () => {});
         sqliteDb.run(`ALTER TABLE CAMPAIGN ADD COLUMN Bank_Name TEXT`, () => {});
@@ -327,9 +365,19 @@ async function initializeDatabase() {
     try { await mysqlPool.query(`ALTER TABLE ORGANIZATION ADD COLUMN Avatar_Url LONGTEXT`); } catch (_) {}
     try { await mysqlPool.query(`ALTER TABLE ORGANIZATION ADD COLUMN Website VARCHAR(255)`); } catch (_) {}
     try { await mysqlPool.query(`ALTER TABLE ORGANIZATION ADD COLUMN Emergency_Hotline VARCHAR(100)`); } catch (_) {}
+    try { await mysqlPool.query(`ALTER TABLE ORGANIZATION ADD COLUMN Gcash_Name VARCHAR(255)`); } catch (_) {}
     try { await mysqlPool.query(`ALTER TABLE ORGANIZATION ADD COLUMN Gcash_Number VARCHAR(50)`); } catch (_) {}
+    try { await mysqlPool.query(`ALTER TABLE ORGANIZATION ADD COLUMN Gcash_Qr_Url LONGTEXT`); } catch (_) {}
+    try { await mysqlPool.query(`ALTER TABLE ORGANIZATION ADD COLUMN Maya_Name VARCHAR(255)`); } catch (_) {}
     try { await mysqlPool.query(`ALTER TABLE ORGANIZATION ADD COLUMN Maya_Number VARCHAR(50)`); } catch (_) {}
+    try { await mysqlPool.query(`ALTER TABLE ORGANIZATION ADD COLUMN Maya_Qr_Url LONGTEXT`); } catch (_) {}
+    try { await mysqlPool.query(`ALTER TABLE ORGANIZATION ADD COLUMN Bank_Name VARCHAR(255)`); } catch (_) {}
+    try { await mysqlPool.query(`ALTER TABLE ORGANIZATION ADD COLUMN Bank_Account_Name VARCHAR(255)`); } catch (_) {}
+    try { await mysqlPool.query(`ALTER TABLE ORGANIZATION ADD COLUMN Bank_Account_Number VARCHAR(100)`); } catch (_) {}
     try { await mysqlPool.query(`ALTER TABLE ORGANIZATION ADD COLUMN Bank_Details TEXT`); } catch (_) {}
+    try { await mysqlPool.query(`ALTER TABLE ORGANIZATION ADD COLUMN Bank_Qr_Url LONGTEXT`); } catch (_) {}
+    try { await mysqlPool.query(`ALTER TABLE ORGANIZATION ADD COLUMN Banner_Url LONGTEXT`); } catch (_) {}
+    try { await mysqlPool.query(`ALTER TABLE ORGANIZATION ADD COLUMN Preferences_Json TEXT`); } catch (_) {}
 
     try { await mysqlPool.query(`ALTER TABLE ADMINISTRATOR ADD COLUMN Name VARCHAR(255)`); } catch (_) {}
     try { await mysqlPool.query(`ALTER TABLE ADMINISTRATOR ADD COLUMN Title VARCHAR(255)`); } catch (_) {}
@@ -353,12 +401,14 @@ async function initializeDatabase() {
       )
     `);
     try { await mysqlPool.query(`ALTER TABLE DONOR ADD COLUMN Name VARCHAR(255)`); } catch (_) {}
+    try { await mysqlPool.query(`ALTER TABLE DONOR ADD COLUMN Legal_Name VARCHAR(255)`); } catch (_) {}
+    try { await mysqlPool.query(`ALTER TABLE DONOR ADD COLUMN Display_Name VARCHAR(255)`); } catch (_) {}
     try { await mysqlPool.query(`ALTER TABLE DONOR ADD COLUMN Mobile_Number VARCHAR(50)`); } catch (_) {}
     try { await mysqlPool.query(`ALTER TABLE DONOR ADD COLUMN Location VARCHAR(255)`); } catch (_) {}
     try { await mysqlPool.query(`ALTER TABLE DONOR ADD COLUMN Bio TEXT`); } catch (_) {}
     try { await mysqlPool.query(`ALTER TABLE DONOR ADD COLUMN Avatar_Url LONGTEXT`); } catch (_) {}
     try { await mysqlPool.query(`ALTER TABLE DONOR ADD COLUMN Preferences_Json TEXT`); } catch (_) {}
-    try { await mysqlPool.query(`ALTER TABLE DONOR ADD COLUMN Last_Name_Change_At DATETIME`); } catch (_) {}
+    try { await mysqlPool.query(`ALTER TABLE DONOR ADD COLUMN Name_Last_Changed_At DATETIME`); } catch (_) {}
 
     await mysqlPool.query(`
       CREATE TABLE IF NOT EXISTS CAMPAIGN (
@@ -377,8 +427,10 @@ async function initializeDatabase() {
         Urgency VARCHAR(100),
         Target_Date VARCHAR(100),
         Document_Url VARCHAR(500),
+        Gcash_Name VARCHAR(255),
         Gcash_Number VARCHAR(50),
         Gcash_Qr_Url LONGTEXT,
+        Maya_Name VARCHAR(255),
         Maya_Number VARCHAR(50),
         Maya_Qr_Url LONGTEXT,
         Bank_Name VARCHAR(100),
@@ -398,8 +450,10 @@ async function initializeDatabase() {
     try { await mysqlPool.query(`ALTER TABLE CAMPAIGN ADD COLUMN Urgency VARCHAR(100)`); } catch (_) {}
     try { await mysqlPool.query(`ALTER TABLE CAMPAIGN ADD COLUMN Target_Date VARCHAR(100)`); } catch (_) {}
     try { await mysqlPool.query(`ALTER TABLE CAMPAIGN ADD COLUMN Document_Url VARCHAR(500)`); } catch (_) {}
+    try { await mysqlPool.query(`ALTER TABLE CAMPAIGN ADD COLUMN Gcash_Name VARCHAR(255)`); } catch (_) {}
     try { await mysqlPool.query(`ALTER TABLE CAMPAIGN ADD COLUMN Gcash_Number VARCHAR(50)`); } catch (_) {}
     try { await mysqlPool.query(`ALTER TABLE CAMPAIGN ADD COLUMN Gcash_Qr_Url LONGTEXT`); } catch (_) {}
+    try { await mysqlPool.query(`ALTER TABLE CAMPAIGN ADD COLUMN Maya_Name VARCHAR(255)`); } catch (_) {}
     try { await mysqlPool.query(`ALTER TABLE CAMPAIGN ADD COLUMN Maya_Number VARCHAR(50)`); } catch (_) {}
     try { await mysqlPool.query(`ALTER TABLE CAMPAIGN ADD COLUMN Maya_Qr_Url LONGTEXT`); } catch (_) {}
     try { await mysqlPool.query(`ALTER TABLE CAMPAIGN ADD COLUMN Bank_Name VARCHAR(100)`); } catch (_) {}

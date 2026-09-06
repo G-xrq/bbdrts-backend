@@ -1813,6 +1813,7 @@ app.post('/api/donations/verify-mock-gateway', async (req, res) => {
 
 // ── GET /api/campaigns (Real Database Campaigns Only) ───────
 app.get('/api/campaigns', async (req, res) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
   try {
     const [rows] = await db.query(`
       SELECT 
@@ -1893,6 +1894,7 @@ app.get('/api/campaigns', async (req, res) => {
 
 // ── Public API ────────────────────────────────────────────
 app.get('/api/public-stats', async (req, res) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
   try {
     const [donors] = await db.query('SELECT COUNT(*) as c FROM DONOR');
     const [orgs] = await db.query("SELECT COUNT(*) as c FROM ORGANIZATION WHERE Verification_Status = 'Approved'");

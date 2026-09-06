@@ -1856,34 +1856,116 @@ app.get('/api/campaigns', async (req, res) => {
       return res.json([]);
     }
 
-    const formatted = rows.map((r) => ({
-      id: r.id,
-      orgId: r.orgId || r.Org_ID || 3,
-      title: r.title,
-      targetAmount: (r.targetAmount || '1.00').toString(),
-      currentAmount: (Number(r.currentAmount) > 0 ? r.currentAmount : 0).toString(),
-      orgName: r.orgName || 'ReliefLink PH',
-      orgAddress: r.orgAddress || '0x206e022D47003B67Ee72bd67fDF2406d43aabC2C',
-      locationRegion: r.locationRegion || 'Southern Leyte, Philippines',
-      gpsCoordinates: r.gpsCoordinates || '10.1335° N, 124.8732° E',
-      beneficiariesImpact: r.beneficiariesImpact || 'Displaced Families & Affected Communities',
-      description: r.description || 'Emergency disaster response, relief distribution, and rehabilitation operation.',
-      urgency: r.urgency || 'HIGH',
-      category: r.category || 'DR',
-      targetDate: r.targetDate || '2026-12-31',
-      documentUrl: r.documentUrl || '',
-      allocationsJson: r.allocationsJson || '[]',
-      contactInfo: r.contactInfo || '',
-      gcashNumber: r.gcashNumber || '',
-      gcashQrUrl: r.gcashQrUrl || '',
-      mayaNumber: r.mayaNumber || '',
-      mayaQrUrl: r.mayaQrUrl || '',
-      bankName: r.bankName || '',
-      bankAccountName: r.bankAccountName || '',
-      bankAccountNumber: r.bankAccountNumber || '',
-      bankQrUrl: r.bankQrUrl || '',
-      isActive: true
-    }));
+    // Query multi-rail donation transactions to calculate live breakdown
+    let txRows = [];
+    try {
+      const [txs] = await db.query(`SELECT Campaign_ID, Tx_Hash, Amount FROM DONATION_TRANSACTION`);
+      txRows = txs || [];
+    } catch (_) {}
+
+    const txByCampaign = {};
+    if (Array.isArray(txRows)) {
+      txRows.forEach(tx => {
+        const cId = tx.Campaign_ID;
+        if (!txByCampaign[cId]) {
+          txByCampaign[cId] = {
+            ethAmount: 0, ethCount: 0,
+            gcashAmount: 0, gcashCount: 0,
+            mayaAmount: 0, mayaCount: 0,
+            bankAmount: 0, bankCount: 0,
+            totalBackers: 0
+          };
+        }
+        const amt = parseFloat(tx.Amount) || 0;
+        const hash = (tx.Tx_Hash || '').toUpperCase();
+        txByCampaign[cId].totalBackers++;
+
+        if (hash.startsWith('FIAT-GCAS') || hash.includes('GCASH')) {
+          txByCampaign[cId].gcashAmount += amt;
+          txByCampaign[cId].gcashCount++;
+        } else if (hash.startsWith('FIAT-MAYA') || hash.includes('MAYA')) {
+          txByCampaign[cId].mayaAmount += amt;
+          txByCampaign[cId].mayaCount++;
+        } else if (hash.startsWith('FIAT-BANK') || hash.startsWith('FIAT-CRED') || hash.includes('BANK') || hash.includes('CARD')) {
+          txByCampaign[cId].bankAmount += amt;
+          txByCampaign[cId].bankCount++;
+        } else {
+          txByCampaign[cId].ethAmount += amt;
+          txByCampaign[cId].ethCount++;
+        }
+      });
+    }
+
+    const formatted = rows.map((r) => {
+      const b = txByCampaign[r.id] || {
+        ethAmount: 0, ethCount: 0,
+        gcashAmount: 0, gcashCount: 0,
+        mayaAmount: 0, mayaCount: 0,
+        bankAmount: 0, bankCount: 0,
+        totalBackers: 0
+      };
+
+      const currentEth = Number(r.currentAmount) > 0 ? Number(r.currentAmount) : 0;
+      const trackedSum = b.ethAmount + b.gcashAmount + b.mayaAmount + b.bankAmount;
+      let finalEthAmount = b.ethAmount;
+      if (currentEth > trackedSum) {
+        finalEthAmount += (currentEth - trackedSum);
+      }
+
+      return {
+        id: r.id,
+        orgId: r.orgId || r.Org_ID || 3,
+        title: r.title,
+        targetAmount: (r.targetAmount || '1.00').toString(),
+        currentAmount: (currentEth > 0 ? currentEth : 0).toString(),
+        orgName: r.orgName || 'ReliefLink PH',
+        orgAddress: r.orgAddress || '0x206e022D47003B67Ee72bd67fDF2406d43aabC2C',
+        locationRegion: r.locationRegion || 'Southern Leyte, Philippines',
+        gpsCoordinates: r.gpsCoordinates || '10.1335° N, 124.8732° E',
+        beneficiariesImpact: r.beneficiariesImpact || 'Displaced Families & Affected Communities',
+        description: r.description || 'Emergency disaster response, relief distribution, and rehabilitation operation.',
+        urgency: r.urgency || 'HIGH',
+        category: r.category || 'DR',
+        targetDate: r.targetDate || '2026-12-31',
+        documentUrl: r.documentUrl || '',
+        allocationsJson: r.allocationsJson || '[]',
+        contactInfo: r.contactInfo || '',
+        gcashNumber: r.gcashNumber || '',
+        gcashQrUrl: r.gcashQrUrl || '',
+        mayaNumber: r.mayaNumber || '',
+        mayaQrUrl: r.mayaQrUrl || '',
+        bankName: r.bankName || '',
+        bankAccountName: r.bankAccountName || '',
+        bankAccountNumber: r.bankAccountNumber || '',
+        bankQrUrl: r.bankQrUrl || '',
+        isActive: true,
+        railBreakdown: {
+          eth: {
+            amount: parseFloat(finalEthAmount.toFixed(6)),
+            php: Math.round(finalEthAmount * 170000),
+            count: b.ethCount || (finalEthAmount > 0 ? 1 : 0)
+          },
+          gcash: {
+            amount: parseFloat(b.gcashAmount.toFixed(6)),
+            php: Math.round(b.gcashAmount * 170000),
+            count: b.gcashCount
+          },
+          maya: {
+            amount: parseFloat(b.mayaAmount.toFixed(6)),
+            php: Math.round(b.mayaAmount * 170000),
+            count: b.mayaCount
+          },
+          bank: {
+            amount: parseFloat(b.bankAmount.toFixed(6)),
+            php: Math.round(b.bankAmount * 170000),
+            count: b.bankCount
+          },
+          totalRaisedEth: parseFloat(currentEth.toFixed(6)),
+          totalRaisedPhp: Math.round(currentEth * 170000),
+          totalBackers: b.totalBackers || (currentEth > 0 ? 1 : 0)
+        }
+      };
+    });
 
     res.json(formatted);
   } catch (err) {

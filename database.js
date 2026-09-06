@@ -1,5 +1,10 @@
 const path = require('path');
-const sqlite3 = require('sqlite3').verbose();
+let sqlite3 = null;
+try {
+  sqlite3 = require('sqlite3').verbose();
+} catch (err) {
+  console.warn('⚠️ SQLite native driver could not be loaded:', err.message);
+}
 const mysql = require('mysql2/promise');
 const bcrypt = require('bcryptjs');
 
@@ -62,6 +67,9 @@ async function seedDefaultAccounts(driver) {
 // ── Initialize SQLite Fallback ────────────────────────────────
 function initSqlite() {
   return new Promise((resolve, reject) => {
+    if (!sqlite3) {
+      return reject(new Error('SQLite native driver is not available on this host. Please configure MySQL (DB_HOST, DB_USER, DB_PASSWORD).'));
+    }
     const dbPath = path.resolve(__dirname, 'blockchain_relief.db');
     sqliteDb = new sqlite3.Database(dbPath, (err) => {
       if (err) return reject(err);

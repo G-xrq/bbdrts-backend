@@ -53,21 +53,44 @@ const rateLimiter = (maxRequests = 300, windowMs = 15 * 60 * 1000) => (req, res,
   next();
 };
 
-// ── Email Transporter Helper (Google Gmail SMTP) ───────────
+// ── Email Transporter Helper (Google Gmail SMTP via Secure Port 465) ───────────
 function getEmailTransporter() {
   const user = process.env.SMTP_USER || process.env.EMAIL_USER || process.env.GMAIL_USER;
   const pass = process.env.SMTP_PASS || process.env.EMAIL_PASS || process.env.GMAIL_PASS;
 
   if (user && pass) {
     return nodemailer.createTransport({
-      service: 'gmail',
+      host: 'smtp.gmail.com',
+      port: 465,
+      secure: true, // SSL on port 465 avoids cloud provider STARTTLS port 587 blockades
       auth: {
         user: user.trim(),
         pass: pass.replace(/\s+/g, '') // remove spaces from Google App Password
-      }
+      },
+      connectionTimeout: 5000, // 5s max to connect
+      greetingTimeout: 5000,   // 5s max for greeting
+      socketTimeout: 7000      // 7s max for socket
     });
   }
   return null;
+}
+
+// ── Resilient Safe Email Dispatcher (Guarantees Backend Never Hangs or Freezes) ──
+async function sendMailSafe(mailOptions, timeoutMs = 6500) {
+  const transporter = getEmailTransporter();
+  if (!transporter) return false;
+
+  try {
+    const sendPromise = transporter.sendMail(mailOptions);
+    const timeoutPromise = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error(`SMTP timed out after ${timeoutMs}ms`)), timeoutMs)
+    );
+    await Promise.race([sendPromise, timeoutPromise]);
+    return true;
+  } catch (err) {
+    console.warn(`⚠️ [SMTP ERROR/TIMEOUT]:`, err.message);
+    return false;
+  }
 }
 
 // ── On-Chain RPC Verification Helper ────────────────────────
@@ -240,51 +263,43 @@ app.post('/api/auth/register-request', rateLimiter(10, 15 * 60 * 1000), async (r
       expiresAt
     });
 
-    const transporter = getEmailTransporter();
-    let emailSent = false;
-
-    if (transporter) {
-      try {
-        const mailOptions = {
-          from: `"BBDRTS Protocol" <${process.env.SMTP_USER || 'gestermacaldo@gmail.com'}>`,
-          to: targetEmail,
-          replyTo: process.env.SMTP_USER || 'gestermacaldo@gmail.com',
-          subject: `BBDRTS Verification Code: ${emailOtpCode}`,
-          text: `Welcome to BBDRTS Protocol!\n\nYour 6-digit Email Verification Code is: ${emailOtpCode}\n\nThis code expires in 5 minutes.\nPlease enter this code on the registration screen to verify your email and activate your account.\n\nThank you,\nBBDRTS Protocol Team - Saint Joseph College CCS`,
-          html: `
-            <div style="font-family: 'Segoe UI', Arial, sans-serif; background-color: #0c1015; color: #f1f5f9; padding: 32px 20px; border-radius: 12px; max-width: 540px; margin: 0 auto; border: 1px solid #1e293b;">
-              <div style="text-align: center; margin-bottom: 24px;">
-                <h2 style="color: #22c55e; margin: 0; font-size: 24px; letter-spacing: -0.5px;">BBDRTS PROTOCOL</h2>
-                <p style="color: #94a3b8; font-size: 13px; margin: 4px 0 0 0;">Blockchain-Based Donation & Relief Transparency System</p>
-              </div>
-              
-              <div style="background-color: #161f2e; border: 1px solid rgba(34, 197, 94, 0.25); border-radius: 10px; padding: 20px; text-align: center; margin-bottom: 20px;">
-                <p style="color: #cbd5e1; font-size: 14px; margin-top: 0;">Welcome to BBDRTS! Please use this 6-digit one-time <strong>EMAIL SECURITY CODE</strong> to verify your ${assignedRole.toUpperCase()} account:</p>
-                <div style="font-size: 32px; font-weight: 800; letter-spacing: 6px; color: #22c55e; background: rgba(34, 197, 94, 0.1); padding: 12px 20px; border-radius: 8px; display: inline-block; margin: 12px 0; border: 1px solid #22c55e;">
-                  ${emailOtpCode}
-                </div>
-                <p style="color: #ef4444; font-size: 12px; margin: 8px 0 0 0; font-weight: 600;">⏳ This verification code expires in 5 minutes.</p>
-              </div>
-
-              <p style="color: #64748b; font-size: 12px; line-height: 1.5; margin-bottom: 20px;">
-                If you did not initiate this registration, please disregard this email.
-              </p>
-
-              <div style="border-top: 1px solid #1e293b; padding-top: 14px; font-size: 11px; color: #475569; text-align: center;">
-                College of Computer Studies · Saint Joseph College · Maasin City, Southern Leyte
-              </div>
+    const mailOptions = {
+      from: `"BBDRTS Protocol" <${process.env.SMTP_USER || 'gestermacaldo@gmail.com'}>`,
+      to: targetEmail,
+      replyTo: process.env.SMTP_USER || 'gestermacaldo@gmail.com',
+      subject: `BBDRTS Verification Code: ${emailOtpCode}`,
+      text: `Welcome to BBDRTS Protocol!\n\nYour 6-digit Email Verification Code is: ${emailOtpCode}\n\nThis code expires in 5 minutes.\nPlease enter this code on the registration screen to verify your email and activate your account.\n\nThank you,\nBBDRTS Protocol Team - Saint Joseph College CCS`,
+      html: `
+        <div style="font-family: 'Segoe UI', Arial, sans-serif; background-color: #0c1015; color: #f1f5f9; padding: 32px 20px; border-radius: 12px; max-width: 540px; margin: 0 auto; border: 1px solid #1e293b;">
+          <div style="text-align: center; margin-bottom: 24px;">
+            <h2 style="color: #22c55e; margin: 0; font-size: 24px; letter-spacing: -0.5px;">BBDRTS PROTOCOL</h2>
+            <p style="color: #94a3b8; font-size: 13px; margin: 4px 0 0 0;">Blockchain-Based Donation & Relief Transparency System</p>
+          </div>
+          
+          <div style="background-color: #161f2e; border: 1px solid rgba(34, 197, 94, 0.25); border-radius: 10px; padding: 20px; text-align: center; margin-bottom: 20px;">
+            <p style="color: #cbd5e1; font-size: 14px; margin-top: 0;">Welcome to BBDRTS! Please use this 6-digit one-time <strong>EMAIL SECURITY CODE</strong> to verify your ${assignedRole.toUpperCase()} account:</p>
+            <div style="font-size: 32px; font-weight: 800; letter-spacing: 6px; color: #22c55e; background: rgba(34, 197, 94, 0.1); padding: 12px 20px; border-radius: 8px; display: inline-block; margin: 12px 0; border: 1px solid #22c55e;">
+              ${emailOtpCode}
             </div>
-          `
-        };
+            <p style="color: #ef4444; font-size: 12px; margin: 8px 0 0 0; font-weight: 600;">⏳ This verification code expires in 5 minutes.</p>
+          </div>
 
-        await transporter.sendMail(mailOptions);
-        emailSent = true;
-        console.log(`✅ [REGISTRATION EMAIL OTP SENT] Code sent successfully to ${targetEmail}`);
-      } catch (err) {
-        console.error(`⚠️ [SMTP ERROR] Failed to send registration email:`, err.message);
-      }
+          <p style="color: #64748b; font-size: 12px; line-height: 1.5; margin-bottom: 20px;">
+            If you did not initiate this registration, please disregard this email.
+          </p>
+
+          <div style="border-top: 1px solid #1e293b; padding-top: 14px; font-size: 11px; color: #475569; text-align: center;">
+            College of Computer Studies · Saint Joseph College · Maasin City, Southern Leyte
+          </div>
+        </div>
+      `
+    };
+
+    const emailSent = await sendMailSafe(mailOptions, 6000);
+    if (emailSent) {
+      console.log(`✅ [REGISTRATION EMAIL OTP SENT] Code sent successfully to ${targetEmail}`);
     } else {
-      console.log(`ℹ️ [DEV LOG] No SMTP configured. Registration Email OTP for ${targetEmail}: [${emailOtpCode}]`);
+      console.log(`ℹ️ [DEV LOG] SMTP unavailable or timed out. Registration Email OTP for ${targetEmail}: [${emailOtpCode}]`);
     }
 
     /* 
@@ -649,58 +664,50 @@ app.post('/api/auth/login-otp-request', rateLimiter(100, 15 * 60 * 1000), async 
       expiresAt
     });
 
-    const transporter = getEmailTransporter();
-    let emailSent = false;
-
-    if (transporter) {
-      try {
-        const mailOptions = {
-          from: `"BBDRTS Protocol" <${process.env.SMTP_USER || 'gestermacaldo@gmail.com'}>`,
-          to: targetEmail,
-          replyTo: process.env.SMTP_USER || 'gestermacaldo@gmail.com',
-          subject: `BBDRTS Login Passcode: ${otpCode}`,
-          text: `Your BBDRTS one-time security login code is: ${otpCode}\n\nRole: ${requestedRole.toUpperCase()}\nThis verification code expires in 5 minutes.\nIf you did not request this code, please ignore this email.\n\nBBDRTS Protocol - Saint Joseph College CCS`,
-          html: `
-            <div style="font-family: 'Segoe UI', Arial, sans-serif; background-color: #0c1015; color: #f1f5f9; padding: 32px 20px; border-radius: 12px; max-width: 540px; margin: 0 auto; border: 1px solid #1e293b;">
-              <div style="text-align: center; margin-bottom: 24px;">
-                <h2 style="color: #22c55e; margin: 0; font-size: 24px; letter-spacing: -0.5px;">BBDRTS PROTOCOL</h2>
-                <p style="color: #94a3b8; font-size: 13px; margin: 4px 0 0 0;">Blockchain-Based Donation & Relief Transparency System</p>
-              </div>
-              
-              <div style="background-color: #161f2e; border: 1px solid rgba(34, 197, 94, 0.25); border-radius: 10px; padding: 20px; text-align: center; margin-bottom: 20px;">
-                <p style="color: #cbd5e1; font-size: 14px; margin-top: 0;">Here is your 6-digit One-Time Security Passcode to access your <strong>${requestedRole.toUpperCase()}</strong> account:</p>
-                <div style="font-size: 32px; font-weight: 800; letter-spacing: 6px; color: #22c55e; background: rgba(34, 197, 94, 0.1); padding: 12px 20px; border-radius: 8px; display: inline-block; margin: 12px 0; border: 1px solid #22c55e;">
-                  ${otpCode}
-                </div>
-                <p style="color: #ef4444; font-size: 12px; margin: 8px 0 0 0; font-weight: 600;">⏳ This one-time code expires in 5 minutes.</p>
-              </div>
-
-              <p style="color: #64748b; font-size: 12px; line-height: 1.5; margin-bottom: 20px;">
-                If you did not request this login code, you can safely ignore this email.
-              </p>
-
-              <div style="border-top: 1px solid #1e293b; padding-top: 14px; font-size: 11px; color: #475569; text-align: center;">
-                College of Computer Studies · Saint Joseph College · Maasin City, Southern Leyte
-              </div>
+    const mailOptions = {
+      from: `"BBDRTS Protocol" <${process.env.SMTP_USER || 'gestermacaldo@gmail.com'}>`,
+      to: targetEmail,
+      replyTo: process.env.SMTP_USER || 'gestermacaldo@gmail.com',
+      subject: `BBDRTS Login Passcode: ${otpCode}`,
+      text: `Your BBDRTS one-time security login code is: ${otpCode}\n\nRole: ${requestedRole.toUpperCase()}\nThis verification code expires in 5 minutes.\nIf you did not request this code, please ignore this email.\n\nBBDRTS Protocol - Saint Joseph College CCS`,
+      html: `
+        <div style="font-family: 'Segoe UI', Arial, sans-serif; background-color: #0c1015; color: #f1f5f9; padding: 32px 20px; border-radius: 12px; max-width: 540px; margin: 0 auto; border: 1px solid #1e293b;">
+          <div style="text-align: center; margin-bottom: 24px;">
+            <h2 style="color: #22c55e; margin: 0; font-size: 24px; letter-spacing: -0.5px;">BBDRTS PROTOCOL</h2>
+            <p style="color: #94a3b8; font-size: 13px; margin: 4px 0 0 0;">Blockchain-Based Donation & Relief Transparency System</p>
+          </div>
+          
+          <div style="background-color: #161f2e; border: 1px solid rgba(34, 197, 94, 0.25); border-radius: 10px; padding: 20px; text-align: center; margin-bottom: 20px;">
+            <p style="color: #cbd5e1; font-size: 14px; margin-top: 0;">Here is your 6-digit One-Time Security Passcode to access your <strong>${requestedRole.toUpperCase()}</strong> account:</p>
+            <div style="font-size: 32px; font-weight: 800; letter-spacing: 6px; color: #22c55e; background: rgba(34, 197, 94, 0.1); padding: 12px 20px; border-radius: 8px; display: inline-block; margin: 12px 0; border: 1px solid #22c55e;">
+              ${otpCode}
             </div>
-          `
-        };
+            <p style="color: #ef4444; font-size: 12px; margin: 8px 0 0 0; font-weight: 600;">⏳ This one-time code expires in 5 minutes.</p>
+          </div>
 
-        await transporter.sendMail(mailOptions);
-        emailSent = true;
-        console.log(`✅ [LOGIN OTP SENT] Code sent successfully to ${targetEmail} (${requestedRole})`);
-      } catch (err) {
-        console.error(`⚠️ [SMTP ERROR] Failed to send login OTP:`, err.message);
-      }
+          <p style="color: #64748b; font-size: 12px; line-height: 1.5; margin-bottom: 20px;">
+            If you did not request this login code, you can safely ignore this email.
+          </p>
+
+          <div style="border-top: 1px solid #1e293b; padding-top: 14px; font-size: 11px; color: #475569; text-align: center;">
+            College of Computer Studies · Saint Joseph College · Maasin City, Southern Leyte
+          </div>
+        </div>
+      `
+    };
+
+    const emailSent = await sendMailSafe(mailOptions, 6000);
+    if (emailSent) {
+      console.log(`✅ [LOGIN OTP SENT] Code sent successfully to ${targetEmail} (${requestedRole})`);
     } else {
-      console.log(`ℹ️ [DEV LOG] No SMTP configured. Login OTP for ${targetEmail} (${requestedRole}): [${otpCode}]`);
+      console.log(`ℹ️ [DEV LOG] SMTP unavailable or timed out. Login OTP for ${targetEmail} (${requestedRole}): [${otpCode}]`);
     }
 
     res.json({
       success: true,
       message: emailSent
         ? `A 6-digit login passcode has been dispatched to ${targetEmail}. Please check your inbox (and Spam/Junk folder if not seen).`
-        : `One-time code generated.`,
+        : `A 6-digit login passcode has been generated. Use the code below to log in:`,
       emailSent,
       devCode: emailSent ? undefined : otpCode
     });
@@ -842,58 +849,50 @@ app.post('/api/auth/forgot-password', rateLimiter(8, 15 * 60 * 1000), async (req
       userId: foundUser[idCol]
     });
 
-    const transporter = getEmailTransporter();
-    let emailSent = false;
-
-    if (transporter) {
-      try {
-        const mailOptions = {
-          from: `"BBDRTS Protocol" <${process.env.SMTP_USER || 'gestermacaldo@gmail.com'}>`,
-          to: targetEmail,
-          replyTo: process.env.SMTP_USER || 'gestermacaldo@gmail.com',
-          subject: `BBDRTS Password Reset Code: ${otpCode}`,
-          text: `You requested a password reset for your BBDRTS account.\n\nYour 6-digit recovery code is: ${otpCode}\n\nThis verification code expires in 5 minutes.\nIf you did not request this reset, please ignore this email.\n\nBBDRTS Protocol Team - Saint Joseph College CCS`,
-          html: `
-            <div style="font-family: 'Segoe UI', Arial, sans-serif; background-color: #0c1015; color: #f1f5f9; padding: 32px 20px; border-radius: 12px; max-width: 540px; margin: 0 auto; border: 1px solid #1e293b;">
-              <div style="text-align: center; margin-bottom: 24px;">
-                <h2 style="color: #22c55e; margin: 0; font-size: 24px; letter-spacing: -0.5px;">BBDRTS PROTOCOL</h2>
-                <p style="color: #94a3b8; font-size: 13px; margin: 4px 0 0 0;">Blockchain-Based Donation & Relief Transparency System</p>
-              </div>
-              
-              <div style="background-color: #161f2e; border: 1px solid rgba(34, 197, 94, 0.25); border-radius: 10px; padding: 20px; text-align: center; margin-bottom: 20px;">
-                <p style="color: #cbd5e1; font-size: 14px; margin-top: 0;">You requested a password reset for your <strong>${foundRole.toUpperCase()}</strong> account. Use this one-time verification code to reset your password:</p>
-                <div style="font-size: 32px; font-weight: 800; letter-spacing: 6px; color: #22c55e; background: rgba(34, 197, 94, 0.1); padding: 12px 20px; border-radius: 8px; display: inline-block; margin: 12px 0; border: 1px solid #22c55e;">
-                  ${otpCode}
-                </div>
-                <p style="color: #ef4444; font-size: 12px; margin: 8px 0 0 0; font-weight: 600;">⏳ This verification code expires in 5 minutes.</p>
-              </div>
-
-              <p style="color: #64748b; font-size: 12px; line-height: 1.5; margin-bottom: 20px;">
-                If you did not initiate this password recovery request, please disregard this email or notify the Disaster Relief Response Desk immediately at <strong>+63 917 890 1234</strong>.
-              </p>
-
-              <div style="border-top: 1px solid #1e293b; padding-top: 14px; font-size: 11px; color: #475569; text-align: center;">
-                College of Computer Studies · Saint Joseph College · Maasin City, Southern Leyte
-              </div>
+    const mailOptions = {
+      from: `"BBDRTS Protocol" <${process.env.SMTP_USER || 'gestermacaldo@gmail.com'}>`,
+      to: targetEmail,
+      replyTo: process.env.SMTP_USER || 'gestermacaldo@gmail.com',
+      subject: `BBDRTS Password Reset Code: ${otpCode}`,
+      text: `You requested a password reset for your BBDRTS account.\n\nYour 6-digit recovery code is: ${otpCode}\n\nThis verification code expires in 5 minutes.\nIf you did not request this reset, please ignore this email.\n\nBBDRTS Protocol Team - Saint Joseph College CCS`,
+      html: `
+        <div style="font-family: 'Segoe UI', Arial, sans-serif; background-color: #0c1015; color: #f1f5f9; padding: 32px 20px; border-radius: 12px; max-width: 540px; margin: 0 auto; border: 1px solid #1e293b;">
+          <div style="text-align: center; margin-bottom: 24px;">
+            <h2 style="color: #22c55e; margin: 0; font-size: 24px; letter-spacing: -0.5px;">BBDRTS PROTOCOL</h2>
+            <p style="color: #94a3b8; font-size: 13px; margin: 4px 0 0 0;">Blockchain-Based Donation & Relief Transparency System</p>
+          </div>
+          
+          <div style="background-color: #161f2e; border: 1px solid rgba(34, 197, 94, 0.25); border-radius: 10px; padding: 20px; text-align: center; margin-bottom: 20px;">
+            <p style="color: #cbd5e1; font-size: 14px; margin-top: 0;">You requested a password reset for your <strong>${foundRole.toUpperCase()}</strong> account. Use this one-time verification code to reset your password:</p>
+            <div style="font-size: 32px; font-weight: 800; letter-spacing: 6px; color: #22c55e; background: rgba(34, 197, 94, 0.1); padding: 12px 20px; border-radius: 8px; display: inline-block; margin: 12px 0; border: 1px solid #22c55e;">
+              ${otpCode}
             </div>
-          `
-        };
+            <p style="color: #ef4444; font-size: 12px; margin: 8px 0 0 0; font-weight: 600;">⏳ This verification code expires in 5 minutes.</p>
+          </div>
 
-        await transporter.sendMail(mailOptions);
-        emailSent = true;
-        console.log(`✅ [EMAIL SENT] Verification OTP sent successfully to ${targetEmail}`);
-      } catch (err) {
-        console.error(`⚠️ [SMTP ERROR] Failed to send email via SMTP:`, err.message);
-      }
+          <p style="color: #64748b; font-size: 12px; line-height: 1.5; margin-bottom: 20px;">
+            If you did not initiate this password recovery request, please disregard this email or notify the Disaster Relief Response Desk immediately at <strong>+63 917 890 1234</strong>.
+          </p>
+
+          <div style="border-top: 1px solid #1e293b; padding-top: 14px; font-size: 11px; color: #475569; text-align: center;">
+            College of Computer Studies · Saint Joseph College · Maasin City, Southern Leyte
+          </div>
+        </div>
+      `
+    };
+
+    const emailSent = await sendMailSafe(mailOptions, 6000);
+    if (emailSent) {
+      console.log(`✅ [EMAIL SENT] Verification OTP sent successfully to ${targetEmail}`);
     } else {
-      console.log(`ℹ️ [DEV LOG] No SMTP credentials configured. Generated OTP for ${targetEmail}: [${otpCode}]`);
+      console.log(`ℹ️ [DEV LOG] SMTP unavailable or timed out. Generated OTP for ${targetEmail}: [${otpCode}]`);
     }
 
     res.json({
       success: true,
-      message: emailSent 
-        ? `A 6-digit verification code has been dispatched to ${targetEmail}. Please check your inbox.`
-        : `Security verification code generated and ready.`,
+      message: emailSent
+        ? `A 6-digit password reset code has been sent to ${targetEmail}. Please check your inbox.`
+        : `A 6-digit password reset code has been generated. For fast recovery, use the code below:`,
       emailSent,
       devCode: emailSent ? undefined : otpCode
     });

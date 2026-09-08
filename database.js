@@ -209,11 +209,13 @@ function initSqlite() {
             Bank_Account_Name TEXT,
             Bank_Account_Number TEXT,
             Bank_Qr_Url TEXT,
+            Tags TEXT,
             FOREIGN KEY (Org_ID) REFERENCES ORGANIZATION(Org_ID) ON DELETE CASCADE
           )
         `);
 
         // Migration columns for existing SQLite database
+        sqliteDb.run(`ALTER TABLE CAMPAIGN ADD COLUMN Tags TEXT`, () => {});
         sqliteDb.run(`ALTER TABLE CAMPAIGN ADD COLUMN Description TEXT`, () => {});
         sqliteDb.run(`ALTER TABLE CAMPAIGN ADD COLUMN Location_Region TEXT`, () => {});
         sqliteDb.run(`ALTER TABLE CAMPAIGN ADD COLUMN Gps_Coordinates TEXT`, () => {});
@@ -445,9 +447,11 @@ async function initializeDatabase() {
         Bank_Account_Name VARCHAR(150),
         Bank_Account_Number VARCHAR(50),
         Bank_Qr_Url LONGTEXT,
+        Tags TEXT,
         FOREIGN KEY (Org_ID) REFERENCES ORGANIZATION(Org_ID) ON DELETE CASCADE
       )
     `);
+    try { await mysqlPool.query(`ALTER TABLE CAMPAIGN ADD COLUMN Tags TEXT`); } catch (_) {}
     try { await mysqlPool.query(`ALTER TABLE CAMPAIGN ADD COLUMN Description TEXT`); } catch (_) {}
     try { await mysqlPool.query(`ALTER TABLE CAMPAIGN ADD COLUMN Location_Region VARCHAR(255)`); } catch (_) {}
     try { await mysqlPool.query(`ALTER TABLE CAMPAIGN ADD COLUMN Gps_Coordinates VARCHAR(255)`); } catch (_) {}

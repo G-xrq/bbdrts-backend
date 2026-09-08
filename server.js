@@ -53,49 +53,83 @@ const rateLimiter = (maxRequests = 300, windowMs = 15 * 60 * 1000) => (req, res,
   next();
 };
 
-// ── Resend HTTP Email API (works on Render free tier — no SMTP port restrictions) ──
+// ── Universal Email Dispatch: Vercel Gmail Relay (Primary) + Resend HTTP (Fallback) ──
+const VERCEL_RELAY_URL = process.env.VERCEL_RELAY_URL || 'https://bbdrts-frontend.vercel.app/api/send-email';
+const EMAIL_RELAY_SECRET = process.env.EMAIL_RELAY_SECRET || 'bbdrts_secure_email_secret_2026';
 const RESEND_API_KEY = process.env.RESEND_API_KEY;
 
-async function sendMailSafe(mailOptions, timeoutMs = 10000) {
-  if (!RESEND_API_KEY) {
-    console.warn('⚠️ [EMAIL] No RESEND_API_KEY configured — skipping email send.');
-    return false;
-  }
-
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-
+async function sendMailSafe(mailOptions, timeoutMs = 8000) {
+  // Strategy 1: Vercel Gmail Serverless Relay (Port 443 HTTPS -> AWS Lambda -> smtp.gmail.com:465)
+  // Sends from personal Gmail (gestermacaldo@gmail.com) to ANY recipient in the world without restrictions
   try {
-    const res = await fetch('https://api.resend.com/emails', {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+    const relayRes = await fetch(VERCEL_RELAY_URL, {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${RESEND_API_KEY}`,
-        'Content-Type': 'application/json'
+        'Content-Type': 'application/json',
+        'x-relay-secret': EMAIL_RELAY_SECRET
       },
       body: JSON.stringify({
-        from: 'BBDRTS Protocol <onboarding@resend.dev>',
-        to: [mailOptions.to],
+        to: mailOptions.to,
         subject: mailOptions.subject,
         html: mailOptions.html || `<p>${mailOptions.text}</p>`,
-        text: mailOptions.text || ''
+        text: mailOptions.text || '',
+        secret: EMAIL_RELAY_SECRET
       }),
       signal: controller.signal
     });
     clearTimeout(timeoutId);
 
-    const data = await res.json();
-    if (res.ok) {
-      console.log(`✅ [RESEND] Email sent successfully to ${mailOptions.to} | id: ${data.id}`);
+    if (relayRes.ok) {
+      const data = await relayRes.json();
+      console.log(`✅ [VERCEL GMAIL RELAY] Email delivered to ${mailOptions.to} | ID: ${data.messageId || 'ok'}`);
       return true;
     } else {
-      console.warn(`⚠️ [RESEND ERROR] ${res.status}:`, data);
-      return false;
+      const errData = await relayRes.json().catch(() => ({}));
+      console.warn(`⚠️ [VERCEL RELAY WARN] Status ${relayRes.status}:`, errData);
     }
-  } catch (err) {
-    clearTimeout(timeoutId);
-    console.warn(`⚠️ [RESEND TIMEOUT/ERROR]:`, err.message);
-    return false;
+  } catch (relayErr) {
+    console.warn(`⚠️ [VERCEL RELAY ERROR]:`, relayErr.message);
   }
+
+  // Strategy 2: Resend HTTP API (Fallback for account owner email)
+  if (RESEND_API_KEY) {
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+      const res = await fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${RESEND_API_KEY}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          from: 'BBDRTS Protocol <onboarding@resend.dev>',
+          to: [mailOptions.to],
+          subject: mailOptions.subject,
+          html: mailOptions.html || `<p>${mailOptions.text}</p>`,
+          text: mailOptions.text || ''
+        }),
+        signal: controller.signal
+      });
+      clearTimeout(timeoutId);
+
+      const data = await res.json();
+      if (res.ok) {
+        console.log(`✅ [RESEND] Email sent successfully to ${mailOptions.to} | id: ${data.id}`);
+        return true;
+      } else {
+        console.warn(`⚠️ [RESEND ERROR] ${res.status}:`, data);
+      }
+    } catch (err) {
+      console.warn(`⚠️ [RESEND TIMEOUT/ERROR]:`, err.message);
+    }
+  }
+
+  return false;
 }
 
 // ── On-Chain RPC Verification Helper ────────────────────────

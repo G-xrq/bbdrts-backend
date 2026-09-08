@@ -3,7 +3,7 @@ const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const nodemailer = require('nodemailer');
+// nodemailer removed — using Resend HTTP API (Render blocks SMTP ports on free tier)
 const db = require('./database');
 
 const app = express();
@@ -53,42 +53,47 @@ const rateLimiter = (maxRequests = 300, windowMs = 15 * 60 * 1000) => (req, res,
   next();
 };
 
-// ── Email Transporter Helper (Google Gmail SMTP via Secure Port 465) ───────────
-function getEmailTransporter() {
-  const user = process.env.SMTP_USER || process.env.EMAIL_USER || process.env.GMAIL_USER || 'gestermacaldo@gmail.com';
-  const pass = process.env.SMTP_PASS || process.env.EMAIL_PASS || process.env.GMAIL_PASS || 'vlijrjrvwonjjmwe';
+// ── Resend HTTP Email API (works on Render free tier — no SMTP port restrictions) ──
+const RESEND_API_KEY = process.env.RESEND_API_KEY;
 
-  if (user && pass) {
-    return nodemailer.createTransport({
-      host: 'smtp.gmail.com',
-      port: 465,
-      secure: true, // SSL on port 465 avoids cloud provider STARTTLS port 587 blockades
-      auth: {
-        user: user.trim(),
-        pass: pass.replace(/\s+/g, '') // remove spaces from Google App Password
-      },
-      connectionTimeout: 5000, // 5s max to connect
-      greetingTimeout: 5000,   // 5s max for greeting
-      socketTimeout: 7000      // 7s max for socket
-    });
+async function sendMailSafe(mailOptions, timeoutMs = 10000) {
+  if (!RESEND_API_KEY) {
+    console.warn('⚠️ [EMAIL] No RESEND_API_KEY configured — skipping email send.');
+    return false;
   }
-  return null;
-}
 
-// ── Resilient Safe Email Dispatcher (Guarantees Backend Never Hangs or Freezes) ──
-async function sendMailSafe(mailOptions, timeoutMs = 6500) {
-  const transporter = getEmailTransporter();
-  if (!transporter) return false;
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    const sendPromise = transporter.sendMail(mailOptions);
-    const timeoutPromise = new Promise((_, reject) =>
-      setTimeout(() => reject(new Error(`SMTP timed out after ${timeoutMs}ms`)), timeoutMs)
-    );
-    await Promise.race([sendPromise, timeoutPromise]);
-    return true;
+    const res = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${RESEND_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        from: 'BBDRTS Protocol <onboarding@resend.dev>',
+        to: [mailOptions.to],
+        subject: mailOptions.subject,
+        html: mailOptions.html || `<p>${mailOptions.text}</p>`,
+        text: mailOptions.text || ''
+      }),
+      signal: controller.signal
+    });
+    clearTimeout(timeoutId);
+
+    const data = await res.json();
+    if (res.ok) {
+      console.log(`✅ [RESEND] Email sent successfully to ${mailOptions.to} | id: ${data.id}`);
+      return true;
+    } else {
+      console.warn(`⚠️ [RESEND ERROR] ${res.status}:`, data);
+      return false;
+    }
   } catch (err) {
-    console.warn(`⚠️ [SMTP ERROR/TIMEOUT]:`, err.message);
+    clearTimeout(timeoutId);
+    console.warn(`⚠️ [RESEND TIMEOUT/ERROR]:`, err.message);
     return false;
   }
 }

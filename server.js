@@ -55,8 +55,8 @@ const rateLimiter = (maxRequests = 300, windowMs = 15 * 60 * 1000) => (req, res,
 
 // ── Email Transporter Helper (Google Gmail SMTP via Secure Port 465) ───────────
 function getEmailTransporter() {
-  const user = process.env.SMTP_USER || process.env.EMAIL_USER || process.env.GMAIL_USER;
-  const pass = process.env.SMTP_PASS || process.env.EMAIL_PASS || process.env.GMAIL_PASS;
+  const user = process.env.SMTP_USER || process.env.EMAIL_USER || process.env.GMAIL_USER || 'gestermacaldo@gmail.com';
+  const pass = process.env.SMTP_PASS || process.env.EMAIL_PASS || process.env.GMAIL_PASS || 'vlijrjrvwonjjmwe';
 
   if (user && pass) {
     return nodemailer.createTransport({

@@ -1432,6 +1432,7 @@ app.post('/api/campaigns', authenticateToken, async (req, res) => {
     title,
     target_amount,
     contract_address,
+    tags,
     description,
     location_region,
     gps_coordinates,
@@ -1463,6 +1464,7 @@ app.post('/api/campaigns', authenticateToken, async (req, res) => {
         Campaign_Title,
         Target_Amount,
         Smart_Contract_Address,
+        Tags,
         Description,
         Location_Region,
         Gps_Coordinates,
@@ -1483,12 +1485,13 @@ app.post('/api/campaigns', authenticateToken, async (req, res) => {
         Bank_Account_Name,
         Bank_Account_Number,
         Bank_Qr_Url
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         req.user.id,
         title,
         target_amount,
         contract_address || null,
+        tags || '',
         description || '',
         location_region || '',
         gps_coordinates || '',
@@ -1675,6 +1678,7 @@ app.get('/api/donations/me', authenticateToken, async (req, res) => {
   if (req.user.role !== 'donor' && req.user.role !== 'organization') return res.status(403).json({ error: 'Invalid role.' });
   try {
     const isDonor = req.user.role === 'donor';
+    const userWallet = (req.user.wallet_address || '').toLowerCase().trim();
     const [rows] = await db.query(`
       SELECT 
         dt.Transaction_ID as id,
@@ -1688,9 +1692,9 @@ app.get('/api/donations/me', authenticateToken, async (req, res) => {
       FROM DONATION_TRANSACTION dt
       LEFT JOIN CAMPAIGN c ON dt.Campaign_ID = c.Campaign_ID
       LEFT JOIN ORGANIZATION o ON (dt.Org_ID = o.Org_ID OR c.Org_ID = o.Org_ID)
-      WHERE ${isDonor ? 'dt.Donor_ID = ?' : '(dt.Org_ID = ? OR c.Org_ID = ?)'}
+      WHERE ${isDonor ? '(dt.Donor_ID = ? OR (dt.Wallet_Address IS NOT NULL AND LOWER(dt.Wallet_Address) = ?))' : '(dt.Org_ID = ? OR c.Org_ID = ?)'}
       ORDER BY dt.Transaction_ID DESC
-    `, isDonor ? [req.user.id] : [req.user.id, req.user.id]);
+    `, isDonor ? [req.user.id, userWallet || '___none___'] : [req.user.id, req.user.id]);
     res.json(rows || []);
   } catch (err) {
     res.status(500).json({ error: 'Failed to fetch personal donations: ' + err.message });
@@ -1821,6 +1825,7 @@ app.get('/api/campaigns', async (req, res) => {
         c.Org_ID as orgId,
         c.Campaign_Title as title, 
         c.Target_Amount as targetAmount,
+        c.Tags as tags,
         c.Description as description,
         c.Location_Region as locationRegion,
         c.Gps_Coordinates as gpsCoordinates,
@@ -1917,6 +1922,7 @@ app.get('/api/campaigns', async (req, res) => {
         orgId: r.orgId || r.Org_ID || 3,
         title: r.title,
         targetAmount: (r.targetAmount || '1.00').toString(),
+        tags: r.tags || '',
         currentAmount: (currentEth > 0 ? currentEth : 0).toString(),
         orgName: r.orgName || 'ReliefLink PH',
         orgAddress: r.orgAddress || '0x206e022D47003B67Ee72bd67fDF2406d43aabC2C',
@@ -1992,23 +1998,142 @@ app.get('/api/public-stats', async (req, res) => {
   }
 });
 
+// ── Global Cumulative Donor Totals (Platform-Wide Single Donor Badge Source of Truth) ──
+app.get('/api/donors/cumulative-totals', async (req, res) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  try {
+    const [rows] = await db.query(`
+      SELECT 
+        dt.Wallet_Address as txWallet,
+        d.Wallet_Address as donorWallet,
+        dt.Donor_ID as donorId,
+        COALESCE(d.Display_Name, d.Name, 'Verified Donor') as donorName,
+        dt.Amount as amount
+      FROM DONATION_TRANSACTION dt
+      LEFT JOIN DONOR d ON dt.Donor_ID = d.Donor_ID
+    `);
+
+    const donorTotals = {};
+    const donorToWallets = {};
+
+    (rows || []).forEach(r => {
+      const amt = parseFloat(r.amount) || 0;
+      const tw = (r.txWallet || '').toLowerCase().trim();
+      const dw = (r.donorWallet || '').toLowerCase().trim();
+      const did = r.donorId ? `id_${r.donorId}` : null;
+      const name = r.donorName || 'Verified Donor';
+
+      if (did) {
+        if (!donorTotals[did]) donorTotals[did] = { totalEth: 0, totalPhp: 0, donationCount: 0, donorName: name };
+        donorTotals[did].totalEth += amt;
+        donorTotals[did].totalPhp = Math.round(donorTotals[did].totalEth * 170000);
+        donorTotals[did].donationCount += 1;
+        if (name && name !== 'Verified Donor') donorTotals[did].donorName = name;
+
+        if (!donorToWallets[did]) donorToWallets[did] = new Set();
+        if (tw && tw !== '0x0000000000000000000000000000000000000000') donorToWallets[did].add(tw);
+        if (dw && dw !== '0x0000000000000000000000000000000000000000') donorToWallets[did].add(dw);
+      }
+
+      const activeWallet = tw && tw !== '0x0000000000000000000000000000000000000000' ? tw : (dw && dw !== '0x0000000000000000000000000000000000000000' ? dw : null);
+      if (activeWallet) {
+        if (!donorTotals[activeWallet]) donorTotals[activeWallet] = { totalEth: 0, totalPhp: 0, donationCount: 0, donorName: name };
+        donorTotals[activeWallet].totalEth += amt;
+        donorTotals[activeWallet].totalPhp = Math.round(donorTotals[activeWallet].totalEth * 170000);
+        donorTotals[activeWallet].donationCount += 1;
+        if (name && name !== 'Verified Donor') donorTotals[activeWallet].donorName = name;
+      }
+    });
+
+    // Cross-link: ensure every linked wallet has the highest cumulative total of the donor
+    Object.entries(donorToWallets).forEach(([did, wallets]) => {
+      const donorStat = donorTotals[did];
+      if (donorStat) {
+        wallets.forEach(w => {
+          if (!donorTotals[w]) {
+            donorTotals[w] = { ...donorStat };
+          } else {
+            donorTotals[w].totalEth = Math.max(donorTotals[w].totalEth, donorStat.totalEth);
+            donorTotals[w].totalPhp = Math.round(donorTotals[w].totalEth * 170000);
+            donorTotals[w].donationCount = Math.max(donorTotals[w].donationCount, donorStat.donationCount);
+          }
+        });
+      }
+    });
+
+    res.json(donorTotals);
+  } catch (err) {
+    console.warn('Failed to fetch donor cumulative totals:', err.message);
+    res.json({});
+  }
+});
+
 app.get('/api/campaigns/:id/donations', async (req, res) => {
   try {
     const [rows] = await db.query(`
       SELECT dt.Tx_Hash, dt.Amount, dt.Is_Anonymous, 
-             COALESCE(dt.Wallet_Address, d.Wallet_Address, o.Wallet_Address, '0x0000000000000000000000000000000000000000') as wallet, 
+             COALESCE(dt.Wallet_Address, d.Wallet_Address, '') as wallet, 
              CASE 
                WHEN dt.Is_Anonymous = 1 THEN 'Anonymous Patron'
-               ELSE COALESCE(d.Display_Name, d.Name, o.Org_Name, 'Verified Donor')
+               ELSE COALESCE(d.Display_Name, d.Name, 'Verified Donor')
              END as donorName,
-             dt.Created_At as createdAt
+             dt.Created_At as createdAt,
+             dt.Donor_ID as donorId
       FROM DONATION_TRANSACTION dt
       LEFT JOIN DONOR d ON dt.Donor_ID = d.Donor_ID
-      LEFT JOIN ORGANIZATION o ON dt.Org_ID = o.Org_ID
       WHERE dt.Campaign_ID = ?
       ORDER BY dt.Transaction_ID DESC
     `, [req.params.id]);
-    res.json(rows);
+
+    // Query all transactions to compute global totals across all campaigns
+    const [allTxs] = await db.query(`
+      SELECT dt.Donor_ID as donorId, dt.Wallet_Address as txWallet, dt.Amount as amount, d.Wallet_Address as donorWallet
+      FROM DONATION_TRANSACTION dt
+      LEFT JOIN DONOR d ON dt.Donor_ID = d.Donor_ID
+    `);
+    const donorTotals = {};
+    const donorToWallets = {};
+
+    (allTxs || []).forEach(tx => {
+      const amt = parseFloat(tx.amount) || 0;
+      const tw = (tx.txWallet || '').toLowerCase().trim();
+      const dw = (tx.donorWallet || '').toLowerCase().trim();
+      const did = tx.donorId ? `id_${tx.donorId}` : null;
+
+      if (did) {
+        donorTotals[did] = (donorTotals[did] || 0) + amt;
+        if (!donorToWallets[did]) donorToWallets[did] = new Set();
+        if (tw && tw !== '0x0000000000000000000000000000000000000000') donorToWallets[did].add(tw);
+        if (dw && dw !== '0x0000000000000000000000000000000000000000') donorToWallets[did].add(dw);
+      }
+
+      const activeWallet = tw && tw !== '0x0000000000000000000000000000000000000000' ? tw : (dw && dw !== '0x0000000000000000000000000000000000000000' ? dw : null);
+      if (activeWallet) {
+        donorTotals[activeWallet] = (donorTotals[activeWallet] || 0) + amt;
+      }
+    });
+
+    Object.entries(donorToWallets).forEach(([did, wallets]) => {
+      const dTotal = donorTotals[did] || 0;
+      wallets.forEach(w => {
+        donorTotals[w] = Math.max(donorTotals[w] || 0, dTotal);
+      });
+    });
+
+    const enriched = (rows || []).map(r => {
+      const w = (r.wallet || '').toLowerCase().trim();
+      const id = r.donorId ? `id_${r.donorId}` : null;
+      // Prioritize logged-in donor ID identity if present
+      const globalEth = (id && donorTotals[id])
+        || (w && w !== '0x0000000000000000000000000000000000000000' && donorTotals[w])
+        || parseFloat(r.Amount || 0);
+      return {
+        ...r,
+        globalTotalEth: globalEth
+      };
+    });
+
+    res.json(enriched);
   } catch (err) {
     res.status(500).json({ error: 'Failed to fetch donations: ' + err.message });
   }

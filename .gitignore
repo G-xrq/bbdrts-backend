@@ -5,6 +5,6 @@ node_modules/
 *.sqlite
 *.sqlite3
 *.db
-!blockchain_relief.db
+blockchain_relief.db
 logs/
 *.log

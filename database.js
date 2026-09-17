@@ -23,6 +23,7 @@ const dbConfig = {
   waitForConnections: true,
   connectionLimit: 10,
   queueLimit: 0,
+  timezone: 'Z',
   ...(isCloud ? { ssl: { rejectUnauthorized: false } } : {})
 };
 
@@ -235,7 +236,8 @@ function initSqlite() {
         sqliteDb.run(`ALTER TABLE CAMPAIGN ADD COLUMN Bank_Name TEXT`, () => {});
         sqliteDb.run(`ALTER TABLE CAMPAIGN ADD COLUMN Bank_Account_Name TEXT`, () => {});
         sqliteDb.run(`ALTER TABLE CAMPAIGN ADD COLUMN Bank_Account_Number TEXT`, () => {});
-        sqliteDb.run(`ALTER TABLE CAMPAIGN ADD COLUMN Bank_Qr_Url TEXT`, () => {});
+        sqliteDb.run(`ALTER TABLE CAMPAIGN ADD COLUMN Is_Active INTEGER DEFAULT 1`, () => {});
+        sqliteDb.run(`ALTER TABLE CAMPAIGN ADD COLUMN Created_At DATETIME`, () => {});
 
         sqliteDb.run(`
           CREATE TABLE IF NOT EXISTS DONATION_TRANSACTION (
@@ -255,6 +257,7 @@ function initSqlite() {
         `);
 
         sqliteDb.run(`ALTER TABLE DONATION_TRANSACTION ADD COLUMN Wallet_Address TEXT`, () => {});
+        sqliteDb.run(`ALTER TABLE DONATION_TRANSACTION ADD COLUMN Payment_Method TEXT`, () => {});
         sqliteDb.run(`ALTER TABLE DONATION_TRANSACTION ADD COLUMN Created_At DATETIME DEFAULT CURRENT_TIMESTAMP`, () => {});
 
         sqliteDb.run(`
@@ -271,6 +274,8 @@ function initSqlite() {
             FOREIGN KEY (Campaign_ID) REFERENCES CAMPAIGN(Campaign_ID) ON DELETE CASCADE
           )
         `);
+
+        sqliteDb.run(`ALTER TABLE MANUAL_DONATION ADD COLUMN Is_Anonymous INTEGER DEFAULT 0`, () => {});
 
         sqliteDb.run(`
           CREATE TABLE IF NOT EXISTS NOTIFICATIONS (
@@ -316,19 +321,22 @@ function initSqlite() {
 // ── Dual Database Initialization ─────────────────────────────
 async function initializeDatabase() {
   try {
-    if (!isCloud) {
-      try {
-        const rootConn = await mysql.createConnection({
-          host: dbConfig.host,
-          user: dbConfig.user,
-          password: dbConfig.password,
-          port: dbConfig.port
-        });
-        await rootConn.query('CREATE DATABASE IF NOT EXISTS `blockchain_relief`');
-        await rootConn.end();
-      } catch (err) {
-        // Silently skip if local MySQL port is closed
-      }
+    // Auto-create the database on both local and cloud (TiDB/MySQL)
+    try {
+      const dbName = process.env.DB_NAME || 'blockchain_relief';
+      const rootConn = await mysql.createConnection({
+        host: dbConfig.host,
+        user: dbConfig.user,
+        password: dbConfig.password,
+        port: dbConfig.port,
+        ...(isCloud ? { ssl: { rejectUnauthorized: false } } : {})
+      });
+      await rootConn.query(`CREATE DATABASE IF NOT EXISTS \`${dbName}\``);
+      await rootConn.end();
+      console.log(`✅ Database "${dbName}" ensured.`);
+    } catch (err) {
+      // Silently skip — DB may already exist or user lacks CREATE privilege
+      console.warn('⚠️ Could not auto-create database:', err.message);
     }
 
     mysqlPool = mysql.createPool(dbConfig);
@@ -356,22 +364,24 @@ async function initializeDatabase() {
         Mobile_Number VARCHAR(50),
         Sec_Registration_No VARCHAR(100),
         Sec_Certificate_Url LONGTEXT,
-        Board_Members_Json TEXT,
+        Board_Members_Json LONGTEXT,
         Dswd_Accreditation_No VARCHAR(100),
         Verified_At DATETIME,
         Verified_By VARCHAR(255),
-        Audit_Notes TEXT
+        Audit_Notes LONGTEXT
       )
     `);
     try { await mysqlPool.query(`ALTER TABLE ORGANIZATION ADD COLUMN Mobile_Number VARCHAR(50)`); } catch (_) {}
     try { await mysqlPool.query(`ALTER TABLE ORGANIZATION ADD COLUMN Sec_Registration_No VARCHAR(100)`); } catch (_) {}
     try { await mysqlPool.query(`ALTER TABLE ORGANIZATION ADD COLUMN Sec_Certificate_Url LONGTEXT`); } catch (_) {}
-    try { await mysqlPool.query(`ALTER TABLE ORGANIZATION ADD COLUMN Board_Members_Json TEXT`); } catch (_) {}
+    try { await mysqlPool.query(`ALTER TABLE ORGANIZATION ADD COLUMN Board_Members_Json LONGTEXT`); } catch (_) {}
+    try { await mysqlPool.query(`ALTER TABLE ORGANIZATION MODIFY COLUMN Board_Members_Json LONGTEXT`); } catch (_) {}
     try { await mysqlPool.query(`ALTER TABLE ORGANIZATION ADD COLUMN Dswd_Accreditation_No VARCHAR(100)`); } catch (_) {}
     try { await mysqlPool.query(`ALTER TABLE ORGANIZATION ADD COLUMN Verified_At DATETIME`); } catch (_) {}
     try { await mysqlPool.query(`ALTER TABLE ORGANIZATION ADD COLUMN Verified_By VARCHAR(255)`); } catch (_) {}
     try { await mysqlPool.query(`ALTER TABLE ORGANIZATION ADD COLUMN Location VARCHAR(255)`); } catch (_) {}
-    try { await mysqlPool.query(`ALTER TABLE ORGANIZATION ADD COLUMN Bio TEXT`); } catch (_) {}
+    try { await mysqlPool.query(`ALTER TABLE ORGANIZATION ADD COLUMN Bio LONGTEXT`); } catch (_) {}
+    try { await mysqlPool.query(`ALTER TABLE ORGANIZATION MODIFY COLUMN Bio LONGTEXT`); } catch (_) {}
     try { await mysqlPool.query(`ALTER TABLE ORGANIZATION ADD COLUMN Avatar_Url LONGTEXT`); } catch (_) {}
     try { await mysqlPool.query(`ALTER TABLE ORGANIZATION ADD COLUMN Website VARCHAR(255)`); } catch (_) {}
     try { await mysqlPool.query(`ALTER TABLE ORGANIZATION ADD COLUMN Emergency_Hotline VARCHAR(100)`); } catch (_) {}
@@ -384,10 +394,14 @@ async function initializeDatabase() {
     try { await mysqlPool.query(`ALTER TABLE ORGANIZATION ADD COLUMN Bank_Name VARCHAR(255)`); } catch (_) {}
     try { await mysqlPool.query(`ALTER TABLE ORGANIZATION ADD COLUMN Bank_Account_Name VARCHAR(255)`); } catch (_) {}
     try { await mysqlPool.query(`ALTER TABLE ORGANIZATION ADD COLUMN Bank_Account_Number VARCHAR(100)`); } catch (_) {}
-    try { await mysqlPool.query(`ALTER TABLE ORGANIZATION ADD COLUMN Bank_Details TEXT`); } catch (_) {}
+    try { await mysqlPool.query(`ALTER TABLE ORGANIZATION ADD COLUMN Bank_Details LONGTEXT`); } catch (_) {}
+    try { await mysqlPool.query(`ALTER TABLE ORGANIZATION MODIFY COLUMN Bank_Details LONGTEXT`); } catch (_) {}
     try { await mysqlPool.query(`ALTER TABLE ORGANIZATION ADD COLUMN Bank_Qr_Url LONGTEXT`); } catch (_) {}
     try { await mysqlPool.query(`ALTER TABLE ORGANIZATION ADD COLUMN Banner_Url LONGTEXT`); } catch (_) {}
-    try { await mysqlPool.query(`ALTER TABLE ORGANIZATION ADD COLUMN Preferences_Json TEXT`); } catch (_) {}
+    try { await mysqlPool.query(`ALTER TABLE ORGANIZATION ADD COLUMN Preferences_Json LONGTEXT`); } catch (_) {}
+    try { await mysqlPool.query(`ALTER TABLE ORGANIZATION MODIFY COLUMN Preferences_Json LONGTEXT`); } catch (_) {}
+    try { await mysqlPool.query(`ALTER TABLE ORGANIZATION ADD COLUMN Audit_Notes LONGTEXT`); } catch (_) {}
+    try { await mysqlPool.query(`ALTER TABLE ORGANIZATION MODIFY COLUMN Audit_Notes LONGTEXT`); } catch (_) {}
 
     try { await mysqlPool.query(`ALTER TABLE ADMINISTRATOR ADD COLUMN Name VARCHAR(255)`); } catch (_) {}
     try { await mysqlPool.query(`ALTER TABLE ADMINISTRATOR ADD COLUMN Title VARCHAR(255)`); } catch (_) {}
@@ -403,9 +417,9 @@ async function initializeDatabase() {
         Name VARCHAR(255),
         Mobile_Number VARCHAR(50),
         Location VARCHAR(255),
-        Bio TEXT,
+        Bio LONGTEXT,
         Avatar_Url LONGTEXT,
-        Preferences_Json TEXT,
+        Preferences_Json LONGTEXT,
         Total_Donated DECIMAL(20, 2) DEFAULT 0,
         Wallet_Address VARCHAR(255)
       )
@@ -415,10 +429,13 @@ async function initializeDatabase() {
     try { await mysqlPool.query(`ALTER TABLE DONOR ADD COLUMN Display_Name VARCHAR(255)`); } catch (_) {}
     try { await mysqlPool.query(`ALTER TABLE DONOR ADD COLUMN Mobile_Number VARCHAR(50)`); } catch (_) {}
     try { await mysqlPool.query(`ALTER TABLE DONOR ADD COLUMN Location VARCHAR(255)`); } catch (_) {}
-    try { await mysqlPool.query(`ALTER TABLE DONOR ADD COLUMN Bio TEXT`); } catch (_) {}
+    try { await mysqlPool.query(`ALTER TABLE DONOR ADD COLUMN Bio LONGTEXT`); } catch (_) {}
+    try { await mysqlPool.query(`ALTER TABLE DONOR MODIFY COLUMN Bio LONGTEXT`); } catch (_) {}
     try { await mysqlPool.query(`ALTER TABLE DONOR ADD COLUMN Avatar_Url LONGTEXT`); } catch (_) {}
-    try { await mysqlPool.query(`ALTER TABLE DONOR ADD COLUMN Preferences_Json TEXT`); } catch (_) {}
+    try { await mysqlPool.query(`ALTER TABLE DONOR ADD COLUMN Preferences_Json LONGTEXT`); } catch (_) {}
+    try { await mysqlPool.query(`ALTER TABLE DONOR MODIFY COLUMN Preferences_Json LONGTEXT`); } catch (_) {}
     try { await mysqlPool.query(`ALTER TABLE DONOR ADD COLUMN Name_Last_Changed_At DATETIME`); } catch (_) {}
+    try { await mysqlPool.query(`ALTER TABLE DONOR ADD COLUMN Is_Anonymous BOOLEAN DEFAULT 0`); } catch (_) {}
 
     await mysqlPool.query(`
       CREATE TABLE IF NOT EXISTS CAMPAIGN (
@@ -457,11 +474,13 @@ async function initializeDatabase() {
     try { await mysqlPool.query(`ALTER TABLE CAMPAIGN ADD COLUMN Gps_Coordinates VARCHAR(255)`); } catch (_) {}
     try { await mysqlPool.query(`ALTER TABLE CAMPAIGN ADD COLUMN Beneficiaries_Impact VARCHAR(255)`); } catch (_) {}
     try { await mysqlPool.query(`ALTER TABLE CAMPAIGN ADD COLUMN Allocations_Json TEXT`); } catch (_) {}
+    try { await mysqlPool.query(`ALTER TABLE CAMPAIGN MODIFY COLUMN Allocations_Json LONGTEXT`); } catch (_) {}
     try { await mysqlPool.query(`ALTER TABLE CAMPAIGN ADD COLUMN Contact_Info VARCHAR(255)`); } catch (_) {}
     try { await mysqlPool.query(`ALTER TABLE CAMPAIGN ADD COLUMN Category VARCHAR(100)`); } catch (_) {}
     try { await mysqlPool.query(`ALTER TABLE CAMPAIGN ADD COLUMN Urgency VARCHAR(100)`); } catch (_) {}
     try { await mysqlPool.query(`ALTER TABLE CAMPAIGN ADD COLUMN Target_Date VARCHAR(100)`); } catch (_) {}
     try { await mysqlPool.query(`ALTER TABLE CAMPAIGN ADD COLUMN Document_Url VARCHAR(500)`); } catch (_) {}
+    try { await mysqlPool.query(`ALTER TABLE CAMPAIGN MODIFY COLUMN Document_Url LONGTEXT`); } catch (_) {}
     try { await mysqlPool.query(`ALTER TABLE CAMPAIGN ADD COLUMN Gcash_Name VARCHAR(255)`); } catch (_) {}
     try { await mysqlPool.query(`ALTER TABLE CAMPAIGN ADD COLUMN Gcash_Number VARCHAR(50)`); } catch (_) {}
     try { await mysqlPool.query(`ALTER TABLE CAMPAIGN ADD COLUMN Gcash_Qr_Url LONGTEXT`); } catch (_) {}
@@ -472,6 +491,8 @@ async function initializeDatabase() {
     try { await mysqlPool.query(`ALTER TABLE CAMPAIGN ADD COLUMN Bank_Account_Name VARCHAR(150)`); } catch (_) {}
     try { await mysqlPool.query(`ALTER TABLE CAMPAIGN ADD COLUMN Bank_Account_Number VARCHAR(50)`); } catch (_) {}
     try { await mysqlPool.query(`ALTER TABLE CAMPAIGN ADD COLUMN Bank_Qr_Url LONGTEXT`); } catch (_) {}
+    try { await mysqlPool.query(`ALTER TABLE CAMPAIGN ADD COLUMN Is_Active TINYINT(1) DEFAULT 1`); } catch (_) {}
+    try { await mysqlPool.query(`ALTER TABLE CAMPAIGN ADD COLUMN Created_At TIMESTAMP DEFAULT CURRENT_TIMESTAMP`); } catch (_) {}
 
     await mysqlPool.query(`
       CREATE TABLE IF NOT EXISTS DONATION_TRANSACTION (
@@ -480,20 +501,24 @@ async function initializeDatabase() {
         Org_ID INT,
         Campaign_ID INT,
         Tx_Hash VARCHAR(255) UNIQUE NOT NULL,
-        Amount DECIMAL(20, 2) NOT NULL,
+        Amount DECIMAL(36, 18) NOT NULL,
         Is_Anonymous BOOLEAN DEFAULT 0,
         FOREIGN KEY (Donor_ID) REFERENCES DONOR(Donor_ID) ON DELETE SET NULL,
         FOREIGN KEY (Org_ID) REFERENCES ORGANIZATION(Org_ID) ON DELETE SET NULL,
         FOREIGN KEY (Campaign_ID) REFERENCES CAMPAIGN(Campaign_ID) ON DELETE CASCADE
       )
     `);
+    try { await mysqlPool.query(`ALTER TABLE DONATION_TRANSACTION MODIFY COLUMN Amount DECIMAL(36, 18) NOT NULL`); } catch (_) {}
+    try { await mysqlPool.query(`ALTER TABLE DONATION_TRANSACTION ADD COLUMN Wallet_Address VARCHAR(255)`); } catch (_) {}
+    try { await mysqlPool.query(`ALTER TABLE DONATION_TRANSACTION ADD COLUMN Created_At TIMESTAMP DEFAULT CURRENT_TIMESTAMP`); } catch (_) {}
+    try { await mysqlPool.query(`ALTER TABLE DONATION_TRANSACTION ADD COLUMN Payment_Method VARCHAR(50) DEFAULT 'ETH'`); } catch (_) {}
 
     await mysqlPool.query(`
       CREATE TABLE IF NOT EXISTS MANUAL_DONATION (
         Manual_ID INT AUTO_INCREMENT PRIMARY KEY,
         Donor_ID INT,
         Campaign_ID INT,
-        Amount DECIMAL(20, 2) NOT NULL,
+        Amount DECIMAL(36, 18) NOT NULL,
         Payment_Method VARCHAR(50),
         Receipt_Base64 LONGTEXT,
         Status VARCHAR(20) DEFAULT 'Pending',
@@ -502,6 +527,7 @@ async function initializeDatabase() {
         FOREIGN KEY (Campaign_ID) REFERENCES CAMPAIGN(Campaign_ID) ON DELETE CASCADE
       )
     `);
+    try { await mysqlPool.query(`ALTER TABLE MANUAL_DONATION MODIFY COLUMN Amount DECIMAL(36, 18) NOT NULL`); } catch (_) {}
 
     await mysqlPool.query(`
       CREATE TABLE IF NOT EXISTS NOTIFICATIONS (

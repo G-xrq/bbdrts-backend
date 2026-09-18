@@ -2129,15 +2129,25 @@ app.get('/api/donations/me', authenticateToken, async (req, res) => {
         dt.Transaction_ID as id,
         dt.Tx_Hash as txHash,
         dt.Amount as amount,
-        COALESCE(dt.Payment_Method, 'ETH') as paymentMethod,
+        COALESCE(dt.Payment_Method, CASE 
+          WHEN UPPER(dt.Tx_Hash) LIKE 'FIAT-GCAS%' THEN 'GCash'
+          WHEN UPPER(dt.Tx_Hash) LIKE 'FIAT-MAYA%' THEN 'Maya'
+          WHEN UPPER(dt.Tx_Hash) LIKE 'FIAT-BANK%' OR UPPER(dt.Tx_Hash) LIKE 'FIAT-CARD%' THEN 'Bank'
+          ELSE 'ETH'
+        END) as paymentMethod,
         dt.Campaign_ID as campaignId,
         dt.Is_Anonymous as isAnonymous,
+        dt.Wallet_Address as donorWallet,
+        d.Display_Name as donorName,
+        d.Username as donorEmail,
         c.Campaign_Title as campaignTitle,
+        c.Category as category,
         o.Org_Name as orgName,
         dt.Created_At as createdAt
       FROM DONATION_TRANSACTION dt
       LEFT JOIN CAMPAIGN c ON dt.Campaign_ID = c.Campaign_ID
       LEFT JOIN ORGANIZATION o ON (dt.Org_ID = o.Org_ID OR c.Org_ID = o.Org_ID)
+      LEFT JOIN DONOR d ON dt.Donor_ID = d.Donor_ID
       WHERE ${isDonor ? '(dt.Donor_ID = ? OR (dt.Wallet_Address IS NOT NULL AND LOWER(dt.Wallet_Address) = ?))' : '(dt.Org_ID = ? OR c.Org_ID = ?)'}
       ORDER BY dt.Transaction_ID DESC
     `, isDonor ? [req.user.id, userWallet || '___none___'] : [req.user.id, req.user.id]);

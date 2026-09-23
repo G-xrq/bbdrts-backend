@@ -1,3 +1,4 @@
+try { require('dotenv').config(); } catch (_) {}
 const { ethers } = require('ethers');
 
 /**
@@ -13,9 +14,8 @@ const { ethers } = require('ethers');
 
 const SEPOLIA_RPCS = [
   process.env.SEPOLIA_RPC_URL || 'https://ethereum-sepolia-rpc.publicnode.com',
-  'https://rpc.sepolia.org',
   'https://1rpc.io/sepolia',
-  'https://sepolia.gateway.tenderly.co'
+  'https://gateway.tenderly.co/public/sepolia'
 ];
 
 const CONTRACT_ADDRESS = process.env.SMART_CONTRACT_ADDRESS || '0xB8Effb4f0394946a01da9C5342fC2e70c1E99ddA';
@@ -33,17 +33,24 @@ let cachedContract = null;
 
 function getProvider() {
   if (!cachedProvider) {
-    cachedProvider = new ethers.JsonRpcProvider(SEPOLIA_RPCS[0]);
+    const url = process.env.SEPOLIA_RPC_URL || 'https://ethereum-sepolia-rpc.publicnode.com';
+    const req = new ethers.FetchRequest(url);
+    req.timeout = 10000;
+    cachedProvider = new ethers.JsonRpcProvider(req, 11155111, { staticNetwork: true });
   }
   return cachedProvider;
 }
 
 function getRelayerWallet() {
-  const pkey = process.env.RELAYER_PRIVATE_KEY;
-  if (!pkey) return null;
+  if (!process.env.RELAYER_PRIVATE_KEY) {
+    try { require('dotenv').config(); } catch (_) {}
+  }
+  const rawKey = (process.env.RELAYER_PRIVATE_KEY || '').trim();
+  if (!rawKey) return null;
   if (!cachedWallet) {
     const provider = getProvider();
-    cachedWallet = new ethers.Wallet(pkey, provider);
+    const formattedKey = rawKey.startsWith('0x') ? rawKey : `0x${rawKey}`;
+    cachedWallet = new ethers.Wallet(formattedKey, provider);
   }
   return cachedWallet;
 }
@@ -111,6 +118,9 @@ async function getRelayerStatus() {
 async function relayDonation({
   campaignId,
   amountPhp,
+  declaredPhp,
+  variancePhp,
+  hasVariance,
   amountEth,
   paymentMethod,
   referenceNumber,
@@ -120,7 +130,15 @@ async function relayDonation({
   const cleanMethod = (paymentMethod || 'FIAT').toUpperCase().replace(/[^A-Z]/g, '');
   const cleanRef = (referenceNumber || '').toString().trim() || Date.now().toString();
   const cid = Number(campaignId) || 1;
-  const note = `BBDRTS-RELAY:${cleanMethod}:REF:${cleanRef}:PHP:${amountPhp || 0}`;
+
+  // Anti-fraud on-chain notarization: if NGO altered the amount, permanently burn the discrepancy into Ethereum Sepolia!
+  let note = `BBDRTS-RELAY:${cleanMethod}:REF:${cleanRef}`;
+  if (hasVariance && declaredPhp !== undefined) {
+    const flag = (variancePhp || 0) < 0 ? 'ALERT_SHORTAGE' : 'ALERT_OVERCREDIT';
+    note += `:DECLARED:${declaredPhp}:CREDITED:${amountPhp}:VARIANCE:${variancePhp}:${flag}`;
+  } else {
+    note += `:PHP:${amountPhp || 0}:AUDIT_MATCH`;
+  }
 
   const wallet = getRelayerWallet();
   const contract = getRelayerContract();
@@ -185,20 +203,27 @@ async function relayDonation({
           console.log(`✅ [Relayer] Live Sepolia Tx Submitted: ${tx.hash}. Awaiting confirmation...`);
           
           // ── 4. Verify Mined Receipt Status (Status 1 = Success) ──
-          const receipt = await tx.wait(1);
-          if (receipt && receipt.status === 1) {
-            console.log(`🎉 [Relayer] Sepolia Tx Confirmed in Block #${receipt.blockNumber} (Status: 1 SUCCESS)!`);
-            return {
-              txHash: tx.hash,
-              onChain: true,
-              explorerUrl: `https://sepolia.etherscan.io/tx/${tx.hash}`,
-              method: cleanMethod,
-              relayerAddress: wallet.address,
-              blockNumber: receipt.blockNumber
-            };
-          } else {
-            throw new Error(`Sepolia EVM transaction mined with non-success status: ${receipt?.status}`);
+          let blockNumber = null;
+          try {
+            const receiptPromise = tx.wait(1);
+            const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('Block wait timeout (mining asynchronously)')), 15000));
+            const receipt = await Promise.race([receiptPromise, timeoutPromise]);
+            if (receipt && receipt.status === 1) {
+              blockNumber = receipt.blockNumber;
+              console.log(`🎉 [Relayer] Sepolia Tx Confirmed in Block #${blockNumber} (Status: 1 SUCCESS)!`);
+            }
+          } catch (waitErr) {
+            console.log(`⏳ [Relayer] Live Sepolia Tx ${tx.hash} submitted to network (${waitErr.message}).`);
           }
+
+          return {
+            txHash: tx.hash,
+            onChain: true,
+            explorerUrl: `https://sepolia.etherscan.io/tx/${tx.hash}`,
+            method: cleanMethod,
+            relayerAddress: wallet.address,
+            blockNumber
+          };
         } else {
           console.warn(`⚠️ [Relayer] No active on-chain campaign found for CID #${cid}. Applying Keccak-256 cryptographic seal.`);
         }

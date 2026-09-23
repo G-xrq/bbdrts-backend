@@ -276,6 +276,10 @@ function initSqlite() {
         `);
 
         sqliteDb.run(`ALTER TABLE MANUAL_DONATION ADD COLUMN Is_Anonymous INTEGER DEFAULT 0`, () => {});
+        sqliteDb.run(`ALTER TABLE MANUAL_DONATION ADD COLUMN Reference_Number TEXT`, () => {});
+        sqliteDb.run(`ALTER TABLE MANUAL_DONATION ADD COLUMN Confirmed_Amount REAL`, () => {});
+        sqliteDb.run(`ALTER TABLE MANUAL_DONATION ADD COLUMN Rejection_Reason TEXT`, () => {});
+        sqliteDb.run(`ALTER TABLE MANUAL_DONATION ADD COLUMN Verified_At DATETIME`, () => {});
 
         sqliteDb.run(`
           CREATE TABLE IF NOT EXISTS NOTIFICATIONS (
@@ -528,6 +532,11 @@ async function initializeDatabase() {
       )
     `);
     try { await mysqlPool.query(`ALTER TABLE MANUAL_DONATION MODIFY COLUMN Amount DECIMAL(36, 18) NOT NULL`); } catch (_) {}
+    try { await mysqlPool.query(`ALTER TABLE MANUAL_DONATION ADD COLUMN Is_Anonymous BOOLEAN DEFAULT 0`); } catch (_) {}
+    try { await mysqlPool.query(`ALTER TABLE MANUAL_DONATION ADD COLUMN Reference_Number VARCHAR(255)`); } catch (_) {}
+    try { await mysqlPool.query(`ALTER TABLE MANUAL_DONATION ADD COLUMN Confirmed_Amount DECIMAL(36, 18)`); } catch (_) {}
+    try { await mysqlPool.query(`ALTER TABLE MANUAL_DONATION ADD COLUMN Rejection_Reason TEXT`); } catch (_) {}
+    try { await mysqlPool.query(`ALTER TABLE MANUAL_DONATION ADD COLUMN Verified_At TIMESTAMP NULL`); } catch (_) {}
 
     await mysqlPool.query(`
       CREATE TABLE IF NOT EXISTS NOTIFICATIONS (

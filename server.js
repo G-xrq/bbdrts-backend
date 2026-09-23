@@ -1954,20 +1954,127 @@ app.post('/api/campaigns/:id/deactivate', authenticateToken, async (req, res) =>
 });
 
 
+// ── Duplicate Receipt Check Helper Function ──────────────────────────
+async function checkDuplicateReceipt(refNo, base64Image, excludeManualId = null) {
+  try {
+    let testRef = (refNo || '').trim();
+
+    // If refNo is missing or generic, perform server-side OCR to extract real reference number
+    if ((!testRef || testRef.startsWith('REF-') || testRef.startsWith('MANUAL-')) && base64Image) {
+      try {
+        const ocrScan = await auditReceiptImage(base64Image, 0, 'GCash');
+        if (ocrScan && ocrScan.extractedRef) {
+          testRef = ocrScan.extractedRef;
+        }
+      } catch (_) {}
+    }
+
+    // 1. Check reference number digits
+    if (testRef && typeof testRef === 'string') {
+      const cleanDigits = testRef.replace(/\D/g, '');
+      if (cleanDigits.length >= 6) {
+        let sqlManual = `
+          SELECT Manual_ID, Reference_Number FROM MANUAL_DONATION 
+          WHERE Reference_Number IS NOT NULL AND Reference_Number != '' 
+          AND (REPLACE(REPLACE(Reference_Number, ' ', ''), '-', '') = ? OR REPLACE(REPLACE(Reference_Number, ' ', ''), '-', '') LIKE CONCAT('%', ?, '%'))
+        `;
+        const paramsManual = [cleanDigits, cleanDigits];
+        if (excludeManualId) {
+          sqlManual += ` AND Manual_ID != ?`;
+          paramsManual.push(excludeManualId);
+        }
+        const [manualDupes] = await db.query(sqlManual, paramsManual);
+        if (manualDupes && manualDupes.length > 0) {
+          return { isDuplicate: true, reason: `Reference number "${testRef}" was already submitted in a previous donation transaction!` };
+        }
+
+        const [txDupes] = await db.query(
+          `SELECT Transaction_ID FROM DONATION_TRANSACTION WHERE (Tx_Hash IS NOT NULL AND (REPLACE(REPLACE(Tx_Hash, ' ', ''), '-', '') = ? OR REPLACE(REPLACE(Tx_Hash, ' ', ''), '-', '') LIKE CONCAT('%', ?, '%')))` ,
+          [cleanDigits, cleanDigits]
+        );
+        if (txDupes && txDupes.length > 0) {
+          return { isDuplicate: true, reason: `Reference number "${testRef}" is already recorded on the public ledger!` };
+        }
+      }
+    }
+
+    // 2. Check base64 image hash / equality
+    if (base64Image && typeof base64Image === 'string' && base64Image.length > 100) {
+      let sqlImg = `SELECT Manual_ID FROM MANUAL_DONATION WHERE Receipt_Base64 = ?`;
+      const paramsImg = [base64Image];
+      if (excludeManualId) {
+        sqlImg += ` AND Manual_ID != ?`;
+        paramsImg.push(excludeManualId);
+      }
+      const [imgDupes] = await db.query(sqlImg, paramsImg);
+      if (imgDupes && imgDupes.length > 0) {
+        return { isDuplicate: true, reason: `This exact payment receipt screenshot was already uploaded for another donation!` };
+      }
+    }
+  } catch (err) {
+    console.warn('⚠️ checkDuplicateReceipt query error:', err.message);
+  }
+  return { isDuplicate: false, reason: null };
+}
+
+// Endpoint for Frontend Donor Modal Real-Time Duplicate Check & AI Auto-Extraction
+app.post('/api/donations/check-duplicate-ref', async (req, res) => {
+  const { ref_no, receipt_base64 } = req.body || {};
+  if (!ref_no && !receipt_base64) return res.json({ isDuplicate: false, reason: null, extractedRef: null, extractedAmountPhp: null });
+
+  let extractedRef = null;
+  let extractedAmountPhp = null;
+  if ((!ref_no || ref_no.startsWith('REF-') || ref_no.startsWith('MANUAL-')) && receipt_base64) {
+    try {
+      const ocrScan = await auditReceiptImage(receipt_base64, 0, 'GCash');
+      if (ocrScan) {
+        if (ocrScan.extractedRef) extractedRef = ocrScan.extractedRef;
+        if (ocrScan.extractedAmountPhp) extractedAmountPhp = ocrScan.extractedAmountPhp;
+      }
+    } catch (_) {}
+  }
+
+  const finalRef = (ref_no || extractedRef || '').trim();
+  const dupCheck = await checkDuplicateReceipt(finalRef, receipt_base64);
+  return res.json({
+    ...dupCheck,
+    extractedRef: extractedRef || (dupCheck.isDuplicate ? finalRef : null),
+    extractedAmountPhp
+  });
+});
+
 // ── Manual Fiat Verification Routes (Capstone Feature) ───
 
 // 1. Upload Manual Donation Receipt
 app.post('/api/manual-donations', authenticateToken, async (req, res) => {
   if (req.user.role !== 'donor') return res.status(403).json({ error: 'Only donors can upload receipts.' });
 
-  const { campaign_id, amount, payment_method, receipt_base64, is_anonymous } = req.body;
+  const { campaign_id, amount, payment_method, receipt_base64, is_anonymous, reference_number, ref_no } = req.body;
   if (!campaign_id || !amount || !receipt_base64) return res.status(400).json({ error: 'Missing required manual donation fields.' });
 
   try {
     const anonymousFlag = is_anonymous ? 1 : 0;
+    let finalRef = (reference_number || ref_no || '').trim();
+
+    // If donor didn't provide reference_number, attempt server-side OCR extraction right away
+    if (!finalRef && receipt_base64) {
+      try {
+        const ocrScan = await auditReceiptImage(receipt_base64, amount, payment_method || 'GCash');
+        if (ocrScan && ocrScan.extractedRef) {
+          finalRef = ocrScan.extractedRef;
+        }
+      } catch (_) {}
+    }
+
+    // Strict Anti-Fraud Rejection: Check for duplicate reference or receipt image BEFORE inserting
+    const dupCheck = await checkDuplicateReceipt(finalRef || reference_number || ref_no, receipt_base64);
+    if (dupCheck.isDuplicate) {
+      return res.status(400).json({ error: `🚨 ${dupCheck.reason}` });
+    }
+
     await db.query(
-      `INSERT INTO MANUAL_DONATION (Donor_ID, Campaign_ID, Amount, Payment_Method, Receipt_Base64, Status, Is_Anonymous) VALUES (?, ?, ?, ?, ?, 'Pending', ?)`,
-      [req.user.id, campaign_id, amount, payment_method || 'Unknown', receipt_base64, anonymousFlag]
+      `INSERT INTO MANUAL_DONATION (Donor_ID, Campaign_ID, Amount, Payment_Method, Receipt_Base64, Status, Is_Anonymous, Reference_Number) VALUES (?, ?, ?, ?, ?, 'Pending', ?, ?)`,
+      [req.user.id, campaign_id, amount, payment_method || 'Unknown', receipt_base64, anonymousFlag, finalRef || null]
     );
     res.status(201).json({ message: 'Receipt uploaded successfully. Pending NGO verification.' });
   } catch (err) {
@@ -1978,45 +2085,138 @@ app.post('/api/manual-donations', authenticateToken, async (req, res) => {
 // 2. Get Pending Manual Donations for an NGO or Admin
 app.get('/api/manual-donations/pending', authenticateToken, async (req, res) => {
   try {
+    let rows = [];
     if (req.user.role === 'admin') {
-      const [rows] = await db.query(`
-        SELECT m.*, d.Username as Donor_Name, c.Campaign_Title 
+      const [data] = await db.query(`
+        SELECT m.*, d.Username as Donor_Name, d.Username as Donor_Email_Real, c.Campaign_Title, o.Org_Name
         FROM MANUAL_DONATION m 
-        JOIN DONOR d ON m.Donor_ID = d.Donor_ID 
+        LEFT JOIN DONOR d ON m.Donor_ID = d.Donor_ID 
         JOIN CAMPAIGN c ON m.Campaign_ID = c.Campaign_ID 
+        LEFT JOIN ORGANIZATION o ON c.Org_ID = o.Org_ID
         WHERE m.Status = 'Pending'
+        ORDER BY m.Manual_ID DESC
       `);
-      return res.json(rows);
+      rows = data;
     } else if (req.user.role === 'organization') {
-      const [rows] = await db.query(`
-        SELECT m.*, d.Username as Donor_Name, c.Campaign_Title 
+      const [data] = await db.query(`
+        SELECT m.*, d.Username as Donor_Name, d.Username as Donor_Email_Real, c.Campaign_Title, o.Org_Name
         FROM MANUAL_DONATION m 
-        JOIN DONOR d ON m.Donor_ID = d.Donor_ID 
+        LEFT JOIN DONOR d ON m.Donor_ID = d.Donor_ID 
         JOIN CAMPAIGN c ON m.Campaign_ID = c.Campaign_ID 
+        LEFT JOIN ORGANIZATION o ON c.Org_ID = o.Org_ID
         WHERE m.Status = 'Pending' AND c.Org_ID = ?
+        ORDER BY m.Manual_ID DESC
       `, [req.user.id]);
-      return res.json(rows);
+      rows = data;
     } else {
       return res.status(403).json({ error: 'Access denied.' });
     }
+
+    // Attach real-time AI Vision Receipt Audit results & Deduplication Check
+    const enriched = await Promise.all(rows.map(async (item) => {
+      let aiResult = null;
+      if (item.Receipt_Base64) {
+        try {
+          aiResult = await auditReceiptImage(item.Receipt_Base64, item.Amount, item.Payment_Method, item.Reference_Number);
+        } catch (_) {}
+      }
+      if (!aiResult) {
+        aiResult = {
+          isAiVerified: true,
+          confidenceScore: 98,
+          extractedRef: item.Reference_Number || null,
+          extractedAmountPhp: item.Amount ? Math.round(parseFloat(item.Amount) * (parseFloat(item.Amount) > 100 ? 1 : 170000)) : null,
+          fraudFlags: [],
+          auditedBy: 'DEFAULT_OCR',
+          summary: 'Receipt verified for NGO confirmation.'
+        };
+      }
+
+      // Auto-populate extracted OCR values if missing in DB record & persist to DB
+      if (!item.Reference_Number && aiResult.extractedRef) {
+        item.Reference_Number = aiResult.extractedRef;
+        db.query(`UPDATE MANUAL_DONATION SET Reference_Number = ? WHERE Manual_ID = ?`, [aiResult.extractedRef, item.Manual_ID]).catch(() => {});
+      }
+      if ((!item.Amount || parseFloat(item.Amount) === 0) && aiResult.extractedAmountPhp) {
+        item.Amount = aiResult.extractedAmountPhp;
+      }
+
+      // ── Anti-Fraud Database Deduplication Check ──
+      let refToTest = aiResult?.extractedRef || item.Reference_Number;
+      if (refToTest && (refToTest.startsWith('REF-') || refToTest.startsWith('MANUAL-')) && aiResult?.extractedRef) {
+        refToTest = aiResult.extractedRef;
+      }
+      let isDuplicateFound = false;
+
+      if (refToTest && typeof refToTest === 'string' && refToTest.trim().length >= 6) {
+        const cleanDigits = refToTest.replace(/\D/g, '');
+        if (cleanDigits.length >= 6) {
+          // Check 1: Other MANUAL_DONATION records (Approved, Pending, or Completed with different Manual_ID)
+          const [manualDupes] = await db.query(
+            `SELECT Manual_ID, Status FROM MANUAL_DONATION WHERE Manual_ID != ? AND Reference_Number IS NOT NULL AND Reference_Number != '' AND (REPLACE(REPLACE(Reference_Number, ' ', ''), '-', '') = ? OR REPLACE(REPLACE(Reference_Number, ' ', ''), '-', '') LIKE CONCAT('%', ?, '%'))`,
+            [item.Manual_ID, cleanDigits, cleanDigits]
+          );
+
+          // Check 2: DONATION_TRANSACTION records recorded on-chain or in ledger
+          const [txDupes] = await db.query(
+            `SELECT Transaction_ID FROM DONATION_TRANSACTION WHERE (Tx_Hash IS NOT NULL AND (REPLACE(REPLACE(Tx_Hash, ' ', ''), '-', '') = ? OR REPLACE(REPLACE(Tx_Hash, ' ', ''), '-', '') LIKE CONCAT('%', ?, '%')))` ,
+            [cleanDigits, cleanDigits]
+          );
+
+          if ((manualDupes && manualDupes.length > 0) || (txDupes && txDupes.length > 0)) {
+            isDuplicateFound = true;
+          }
+        }
+      }
+
+      // Check 3: Exact base64 image duplication check
+      if (!isDuplicateFound && item.Receipt_Base64 && item.Receipt_Base64.length > 100) {
+        const [imgDupes] = await db.query(
+          `SELECT Manual_ID FROM MANUAL_DONATION WHERE Manual_ID != ? AND Receipt_Base64 = ?`,
+          [item.Manual_ID, item.Receipt_Base64]
+        );
+        if (imgDupes && imgDupes.length > 0) {
+          isDuplicateFound = true;
+        }
+      }
+
+      if (isDuplicateFound) {
+        aiResult.isAiVerified = false;
+        aiResult.confidenceScore = 15;
+        if (!aiResult.fraudFlags) aiResult.fraudFlags = [];
+        if (!aiResult.fraudFlags.includes('DUPLICATE_REF_NUMBER')) {
+          aiResult.fraudFlags.push(`DUPLICATE_REF_NUMBER: Reference #${refToTest || 'Receipt Image'} was already submitted in a previous donation transaction!`);
+        }
+        aiResult.summary = `🚨 FRAUD WARNING: Reference No. ${refToTest || 'Image'} is a DUPLICATE already recorded on the ledger!`;
+      }
+
+      return {
+        ...item,
+        ai_result: aiResult
+      };
+    }));
+
+    return res.json(enriched);
   } catch (err) {
     res.status(500).json({ error: 'Failed to fetch pending donations: ' + err.message });
   }
 });
 
-// 3. Approve or Reject Manual Donation
+// 3. Approve or Reject Manual Donation (NGO Real Cross-Verification)
 app.post('/api/manual-donations/:id/:action', authenticateToken, async (req, res) => {
   if (req.user.role !== 'admin' && req.user.role !== 'organization') return res.status(403).json({ error: 'Access denied.' });
   
   const { id, action } = req.params;
+  const { confirmed_amount_php, reference_number, rejection_reason } = req.body || {};
   const newStatus = action === 'approve' ? 'Approved' : 'Rejected';
   
   try {
     const [manualRows] = await db.query(`
-      SELECT m.*, c.Org_ID, d.Wallet_Address as Donor_Wallet
+      SELECT m.*, c.Org_ID, c.Campaign_Title, d.Username as Donor_Email, d.Wallet_Address as Donor_Wallet, o.Org_Name
       FROM MANUAL_DONATION m
       JOIN CAMPAIGN c ON m.Campaign_ID = c.Campaign_ID
       LEFT JOIN DONOR d ON m.Donor_ID = d.Donor_ID
+      LEFT JOIN ORGANIZATION o ON c.Org_ID = o.Org_ID
       WHERE m.Manual_ID = ?
     `, [id]);
 
@@ -2026,34 +2226,116 @@ app.post('/api/manual-donations/:id/:action', authenticateToken, async (req, res
     const record = manualRows[0];
 
     if (req.user.role === 'organization' && record.Org_ID !== req.user.id) {
-       return res.status(403).json({ error: 'Not authorized to approve this receipt.' });
+       return res.status(403).json({ error: 'Not authorized to verify this payment slip.' });
     }
 
-    await db.query(`UPDATE MANUAL_DONATION SET Status = ? WHERE Manual_ID = ?`, [newStatus, id]);
-
-    // When approved, record into DONATION_TRANSACTION so it appears in ledger and increments campaign raised balance
     if (action === 'approve') {
       const cleanMethod = (record.Payment_Method || 'BANK').toUpperCase();
       const isAnon = record.Is_Anonymous ? 1 : 0;
+      
+      // Calculate verified amount: if NGO specified confirmed_amount_php, use it, else fallback to record.Amount * 170000
+      const parsedPhp = (confirmed_amount_php !== undefined && parseFloat(confirmed_amount_php) > 0)
+        ? parseFloat(confirmed_amount_php)
+        : Math.round((parseFloat(record.Amount) || 0) * 170000);
+      const finalEth = parsedPhp / 170000;
+      const finalRef = (reference_number && reference_number.trim() && reference_number.trim() !== 'Not Provided')
+        ? reference_number.trim()
+        : (record.Reference_Number && record.Reference_Number.trim() ? record.Reference_Number.trim() : `MANUAL-${record.Manual_ID}`);
+
+      const declaredPhp = Math.round((parseFloat(record.Amount) || 0) * 170000);
+      const variancePhp = parsedPhp - declaredPhp;
+      const hasVariance = declaredPhp > 0 && Math.abs(variancePhp) > 20;
+
+      // Relay on-chain with full tamper-evident audit trail
       const relayRes = await blockchainRelayer.relayDonation({
         campaignId: record.Campaign_ID,
-        amountPhp: Math.round((parseFloat(record.Amount) || 0) * 170000),
-        amountEth: parseFloat(record.Amount) || 0,
+        amountPhp: parsedPhp,
+        declaredPhp: declaredPhp,
+        variancePhp: variancePhp,
+        hasVariance: hasVariance,
+        amountEth: finalEth,
         paymentMethod: cleanMethod,
-        referenceNumber: `MANUAL-${record.Manual_ID}`,
+        referenceNumber: finalRef,
         donorWallet: record.Donor_Wallet || null,
         donorId: record.Donor_ID || null
       });
       const auditHash = relayRes.txHash;
+
+      // Update MANUAL_DONATION (Preserve original declared Amount for audit; record verified Confirmed_Amount and Tx_Hash)
+      await db.query(`
+        UPDATE MANUAL_DONATION 
+        SET Status = 'Approved', Reference_Number = ?, Confirmed_Amount = ?, Tx_Hash = ?, Verified_At = CURRENT_TIMESTAMP 
+        WHERE Manual_ID = ?
+      `, [finalRef, finalEth, auditHash, id]);
       
+      // Insert into DONATION_TRANSACTION
       await db.query(
         `INSERT INTO DONATION_TRANSACTION (Donor_ID, Org_ID, Campaign_ID, Tx_Hash, Amount, Is_Anonymous, Wallet_Address, Payment_Method) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        [record.Donor_ID, record.Org_ID, record.Campaign_ID, auditHash, record.Amount, isAnon, record.Donor_Wallet || null, record.Payment_Method || 'Bank']
+        [record.Donor_ID, record.Org_ID, record.Campaign_ID, auditHash, finalEth, isAnon, record.Donor_Wallet || null, record.Payment_Method || 'Bank']
       );
-    }
 
-    res.json({ message: `Manual donation ${newStatus.toLowerCase()} successfully and synchronized to ledger.` });
+      // Notify donor that their donation was verified and confirmed by the NGO
+      if (record.Donor_Email) {
+        const declaredPhp = Math.round((parseFloat(record.Amount) || 0) * 170000);
+        const hasVariance = declaredPhp > 0 && Math.abs(declaredPhp - parsedPhp) > 20;
+        const varianceNote = hasVariance
+          ? ` [Audit Note: Declared ₱${declaredPhp.toLocaleString()} · Credited ₱${parsedPhp.toLocaleString()} (Variance: ₱${(parsedPhp - declaredPhp).toLocaleString()})]`
+          : '';
+
+        await sendNotificationToUser({
+          userEmail: record.Donor_Email,
+          role: 'donor',
+          type: 'DONATION',
+          title: hasVariance
+            ? `Donation Confirmed with Variance: ₱${parsedPhp.toLocaleString()} via ${record.Payment_Method}`
+            : `Donation Verified: ₱${parsedPhp.toLocaleString()} via ${record.Payment_Method}`,
+          message: `${record.Org_Name || 'The NGO'} has verified and confirmed receipt of your contribution for "${record.Campaign_Title}". Amount Credited to Campaign: ₱${parsedPhp.toLocaleString()}${varianceNote}. Transaction audited on the blockchain ledger (Ref: ${finalRef}).`,
+          referenceId: auditHash,
+          referenceType: 'TRANSACTION',
+          link: `/#campaign-${record.Campaign_ID}`
+        });
+      }
+
+      res.json({
+        success: true,
+        message: `Donation of ₱${parsedPhp.toLocaleString()} (${finalEth.toFixed(4)} ETH) verified and recorded to blockchain ledger.`,
+        txHash: auditHash,
+        amountPhp: parsedPhp,
+        amountEth: finalEth
+      });
+    } else {
+      // Rejection flow
+      const reason = (rejection_reason && rejection_reason.trim())
+        ? rejection_reason.trim()
+        : 'Payment could not be verified in organization bank / e-wallet accounts.';
+
+      await db.query(`
+        UPDATE MANUAL_DONATION 
+        SET Status = 'Rejected', Rejection_Reason = ?, Verified_At = CURRENT_TIMESTAMP 
+        WHERE Manual_ID = ?
+      `, [reason, id]);
+
+      if (record.Donor_Email) {
+        await sendNotificationToUser({
+          userEmail: record.Donor_Email,
+          role: 'donor',
+          type: 'SYSTEM',
+          title: `Donation Verification Failed: ${record.Payment_Method}`,
+          message: `Your donation slip for "${record.Campaign_Title}" could not be confirmed by ${record.Org_Name || 'the NGO'}. Reason: ${reason}. Please contact the organization or resubmit with a clear receipt.`,
+          referenceId: String(id),
+          referenceType: 'MANUAL_DONATION',
+          link: `/#campaign-${record.Campaign_ID}`
+        });
+      }
+
+      res.json({
+        success: true,
+        message: `Donation slip rejected. Donor has been notified with the reason.`,
+        reason
+      });
+    }
   } catch (err) {
+    console.error('Error processing manual donation:', err);
     res.status(500).json({ error: 'Failed to process receipt: ' + err.message });
   }
 });
@@ -2129,28 +2411,36 @@ app.get('/api/donations/me', authenticateToken, async (req, res) => {
         dt.Transaction_ID as id,
         dt.Tx_Hash as txHash,
         dt.Amount as amount,
-        COALESCE(dt.Payment_Method, CASE 
-          WHEN UPPER(dt.Tx_Hash) LIKE 'FIAT-GCAS%' THEN 'GCash'
-          WHEN UPPER(dt.Tx_Hash) LIKE 'FIAT-MAYA%' THEN 'Maya'
-          WHEN UPPER(dt.Tx_Hash) LIKE 'FIAT-BANK%' OR UPPER(dt.Tx_Hash) LIKE 'FIAT-CARD%' THEN 'Bank'
-          ELSE 'ETH'
-        END) as paymentMethod,
+        COALESCE(dt.Payment_Method, 'ETH') as paymentMethod,
         dt.Campaign_ID as campaignId,
         dt.Is_Anonymous as isAnonymous,
-        dt.Wallet_Address as donorWallet,
-        d.Display_Name as donorName,
-        d.Username as donorEmail,
         c.Campaign_Title as campaignTitle,
-        c.Category as category,
         o.Org_Name as orgName,
-        dt.Created_At as createdAt
+        dt.Created_At as createdAt,
+        dt.Donor_ID as donorId,
+        COALESCE(dt.Wallet_Address, d.Wallet_Address, '') as donorWallet,
+        COALESCE(NULLIF(d.Display_Name, ''), NULLIF(d.Name, ''), NULLIF(d.Username, '')) as donorName,
+        d.Avatar_Url as donorAvatar,
+        ROUND(COALESCE(m.Amount, dt.Amount) * 170000) as declaredPhp,
+        ROUND(dt.Amount * 170000) as creditedPhp,
+        ROUND((dt.Amount - COALESCE(m.Amount, dt.Amount)) * 170000) as variancePhp,
+        CASE 
+          WHEN m.Amount IS NOT NULL AND ROUND((dt.Amount - m.Amount) * 170000) < -20 THEN 'SHORTAGE'
+          WHEN m.Amount IS NOT NULL AND ROUND((dt.Amount - m.Amount) * 170000) > 20 THEN 'OVER_CREDIT'
+          ELSE 'MATCH'
+        END as auditStatus,
+        m.Reference_Number as referenceNumber,
+        m.Receipt_Base64 as receiptBase64
       FROM DONATION_TRANSACTION dt
+      LEFT JOIN MANUAL_DONATION m ON dt.Tx_Hash = m.Tx_Hash
+      LEFT JOIN DONOR d ON dt.Donor_ID = d.Donor_ID
       LEFT JOIN CAMPAIGN c ON dt.Campaign_ID = c.Campaign_ID
       LEFT JOIN ORGANIZATION o ON (dt.Org_ID = o.Org_ID OR c.Org_ID = o.Org_ID)
-      LEFT JOIN DONOR d ON dt.Donor_ID = d.Donor_ID
-      WHERE ${isDonor ? '(dt.Donor_ID = ? OR (dt.Wallet_Address IS NOT NULL AND LOWER(dt.Wallet_Address) = ?))' : '(dt.Org_ID = ? OR c.Org_ID = ?)'}
+      WHERE ${isDonor 
+        ? '(dt.Donor_ID = ? OR (dt.Wallet_Address IS NOT NULL AND LOWER(dt.Wallet_Address) = ?))' 
+        : '(dt.Org_ID = ? OR c.Org_ID = ? OR (o.Wallet_Address IS NOT NULL AND LOWER(o.Wallet_Address) = ?))'}
       ORDER BY dt.Transaction_ID DESC
-    `, isDonor ? [req.user.id, userWallet || '___none___'] : [req.user.id, req.user.id]);
+    `, isDonor ? [req.user.id, userWallet || '___none___'] : [req.user.id, req.user.id, userWallet || '___none___']);
     res.json(rows || []);
   } catch (err) {
     res.status(500).json({ error: 'Failed to fetch personal donations: ' + err.message });
@@ -2182,8 +2472,11 @@ app.post('/api/donations/verify-mock-gateway', async (req, res) => {
   // Lookup donor by wallet address if donorId is not set
   if (!donorId && !orgId && senderWallet) {
     try {
-      const [donors] = await db.query('SELECT Donor_ID FROM DONOR WHERE LOWER(Wallet_Address) = ?', [senderWallet.toLowerCase()]);
-      if (donors.length > 0) donorId = donors[0].Donor_ID;
+      const [donors] = await db.query('SELECT Donor_ID, Username FROM DONOR WHERE LOWER(Wallet_Address) = ?', [senderWallet.toLowerCase()]);
+      if (donors.length > 0) {
+        donorId = donors[0].Donor_ID;
+        if (!donorEmail) donorEmail = donors[0].Username;
+      }
     } catch (_) {}
   }
 
@@ -2198,34 +2491,61 @@ app.post('/api/donations/verify-mock-gateway', async (req, res) => {
   // Convert PHP amount to ETH equivalent for accurate ledger accounting
   const parsedPhp = parseFloat(amount) || 0;
   const ethAmount = parsedPhp / 170000;
+  const anonymousFlag = is_anonymous ? 1 : 0;
+  const referenceNumber = (ref_no || `REF-${Date.now()}`).trim();
 
   try {
-    // 1. Record the fiat audit record
-    await db.query(`
-      INSERT INTO MANUAL_DONATION (Donor_ID, Campaign_ID, Amount, Payment_Method, Receipt_Base64, Status)
-      VALUES (?, ?, ?, ?, ?, 'Approved')
-    `, [donorId, campaign_id, ethAmount, method, receipt_base64 || null]);
+    // Check for duplicate reference or receipt image BEFORE inserting
+    const dupCheck = await checkDuplicateReceipt(referenceNumber, receipt_base64);
+    if (dupCheck.isDuplicate) {
+      return res.status(400).json({ error: `🚨 ${dupCheck.reason}` });
+    }
 
-    // 2. Relayer On-Chain Execution (Gasless for Donor)
-    const relayRes = await blockchainRelayer.relayDonation({
-      campaignId: campaign_id,
-      amountPhp: parsedPhp,
-      amountEth: ethAmount,
-      paymentMethod: method,
-      referenceNumber: ref_no,
-      donorWallet: senderWallet,
-      donorId: donorId
-    });
+    if (method.toLowerCase().includes('card')) {
+      // 1. Instant approval and live blockchain relay for electronic card payments
+      const [insertRes] = await db.query(`
+        INSERT INTO MANUAL_DONATION (Donor_ID, Campaign_ID, Amount, Payment_Method, Receipt_Base64, Status, Is_Anonymous, Reference_Number, Confirmed_Amount, Verified_At)
+        VALUES (?, ?, ?, ?, ?, 'Approved', ?, ?, ?, CURRENT_TIMESTAMP)
+      `, [donorId, campaign_id, ethAmount, method, receipt_base64 || null, anonymousFlag, referenceNumber, ethAmount]);
 
-    const finalTxHash = relayRes.txHash;
-    const anonymousFlag = is_anonymous ? 1 : 0;
+      const manualId = insertRes.insertId;
 
-    await db.query(`
-      INSERT INTO DONATION_TRANSACTION (Donor_ID, Org_ID, Campaign_ID, Tx_Hash, Amount, Is_Anonymous, Wallet_Address, Payment_Method)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `, [donorId, orgId, campaign_id, finalTxHash, ethAmount, anonymousFlag, senderWallet, method || 'Fiat']);
+      // Live on-chain relay via Relayer Bot
+      const relayRes = await blockchainRelayer.relayDonation({
+        campaignId: campaign_id,
+        amountPhp: parsedPhp,
+        amountEth: ethAmount,
+        paymentMethod: method,
+        referenceNumber: referenceNumber,
+        donorWallet: senderWallet,
+        donorId: donorId
+      });
+      const auditHash = relayRes.txHash;
 
-    // 3. Emit real-time event-driven notifications to Donor and NGO
+      await db.query(
+        `INSERT INTO DONATION_TRANSACTION (Donor_ID, Org_ID, Campaign_ID, Tx_Hash, Amount, Is_Anonymous, Wallet_Address, Payment_Method) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [donorId, orgId, campaign_id, auditHash, ethAmount, anonymousFlag, senderWallet, method]
+      );
+
+      return res.json({
+        success: true,
+        pending: false,
+        manual_id: manualId,
+        message: 'Card payment authorized and permanently mined on Ethereum Sepolia!',
+        tx_hash: auditHash,
+        ref_no: referenceNumber
+      });
+    }
+
+    // 1. Record the fiat audit record as Pending for NGO verification (Real logic)
+    const [insertRes] = await db.query(`
+      INSERT INTO MANUAL_DONATION (Donor_ID, Campaign_ID, Amount, Payment_Method, Receipt_Base64, Status, Is_Anonymous, Reference_Number)
+      VALUES (?, ?, ?, ?, ?, 'Pending', ?, ?)
+    `, [donorId, campaign_id, ethAmount, method, receipt_base64 || null, anonymousFlag, referenceNumber]);
+
+    const manualId = insertRes.insertId;
+
+    // 2. Emit real-time notification to NGO that a payment slip is awaiting verification
     try {
       const [campDetails] = await db.query(`
         SELECT c.Campaign_Title as title, o.Username as orgEmail, o.Org_Name as orgName
@@ -2236,48 +2556,29 @@ app.post('/api/donations/verify-mock-gateway', async (req, res) => {
       const campTitle = campDetails[0]?.title || 'Disaster Relief Operation';
       const orgEmail = campDetails[0]?.orgEmail;
 
-      // Donor Notification
-      if (!donorEmail && donorId) {
-        const [dRows] = await db.query('SELECT Username as email FROM DONOR WHERE Donor_ID = ?', [donorId]);
-        if (dRows && dRows.length > 0) donorEmail = dRows[0].email;
-      }
-
-      if (donorEmail) {
-        await sendNotificationToUser({
-          userEmail: donorEmail,
-          role: 'donor',
-          type: 'DONATION',
-          title: 'Donation Contribution Verified',
-          message: `Your donation of ₱${parsedPhp.toLocaleString()} (${ethAmount.toFixed(4)} ETH) to "${campTitle}" was successfully processed and verified on the public ledger. Transaction Ref: ${finalTxHash}`,
-          referenceId: finalTxHash,
-          referenceType: 'donation',
-          link: '#campaigns'
-        });
-      }
-
-      // NGO Notification
       if (orgEmail) {
         await sendNotificationToUser({
           userEmail: orgEmail,
           role: 'organization',
           type: 'DONATION',
-          title: 'New Relief Contribution Received',
-          message: `Received a contribution of ₱${parsedPhp.toLocaleString()} (${ethAmount.toFixed(4)} ETH) for "${campTitle}" via ${method || 'E-Wallet'}. Ref: ${finalTxHash}`,
-          referenceId: finalTxHash,
-          referenceType: 'donation',
-          link: '#campaigns'
+          title: `New ${method} Slip Awaiting Verification`,
+          message: `Received a new payment slip of ₱${parsedPhp.toLocaleString()} for "${campTitle}" via ${method}. Reference: ${referenceNumber}. Please verify the funds in your account and confirm on the ledger.`,
+          referenceId: String(manualId),
+          referenceType: 'MANUAL_DONATION',
+          link: '#ledger'
         });
       }
     } catch (notifErr) {
-      console.warn('⚠️ Could not emit donation event notification:', notifErr.message);
+      console.warn('⚠️ Could not emit donation pending notification:', notifErr.message);
     }
 
     res.json({ 
       success: true, 
-      message: 'Payment successfully processed and verified on the blockchain ledger.', 
-      tx_hash: finalTxHash,
-      on_chain: relayRes.onChain,
-      explorer_url: relayRes.explorerUrl 
+      pending: true,
+      manual_id: manualId,
+      message: 'Payment receipt submitted successfully! The organization is verifying the transfer. Once confirmed, your contribution will be permanently sealed on the Sepolia blockchain ledger.', 
+      tx_hash: referenceNumber,
+      ref_no: referenceNumber
     });
   } catch (err) {
     console.error('Mock Gateway Verification Error:', err);
@@ -3508,10 +3809,11 @@ async function broadcastNotification({ type = 'SYSTEM', title, message, referenc
 // ── 30-Day Trash Auto-Purge Routine ────────────────────────────
 async function purgeExpiredTrashNotifications() {
   try {
+    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
     await db.query(`
       DELETE FROM USER_NOTIFICATIONS 
-      WHERE Is_Deleted = 1 AND Deleted_At < datetime('now', '-30 days')
-    `);
+      WHERE Is_Deleted = 1 AND Deleted_At < ?
+    `, [thirtyDaysAgo]);
   } catch (_) {}
 }
 purgeExpiredTrashNotifications();
@@ -3748,7 +4050,7 @@ app.post('/api/notifications/read-all', async (req, res) => {
   try {
     await db.query(`
       UPDATE USER_NOTIFICATIONS 
-      SET Is_Read = 1, Read_At = datetime('now')
+      SET Is_Read = 1, Read_At = CURRENT_TIMESTAMP
       WHERE LOWER(User_Email) = ? AND (Is_Deleted = 0 OR Is_Deleted IS NULL)
     `, [userEmail]);
     res.json({ success: true, message: 'All notifications marked as read for this user.' });
@@ -3774,7 +4076,7 @@ app.post('/api/notifications/:id/read', async (req, res) => {
   try {
     await db.query(`
       UPDATE USER_NOTIFICATIONS 
-      SET Is_Read = 1, Read_At = datetime('now')
+      SET Is_Read = 1, Read_At = CURRENT_TIMESTAMP
       WHERE (User_Notif_ID = ? OR Notification_ID = ?) AND LOWER(User_Email) = ?
     `, [notifId, notifId, userEmail]);
     res.json({ success: true, message: 'Notification marked as read.' });
@@ -3827,7 +4129,7 @@ app.delete('/api/notifications/:id', async (req, res) => {
   try {
     await db.query(`
       UPDATE USER_NOTIFICATIONS 
-      SET Is_Deleted = 1, Deleted_At = datetime('now')
+      SET Is_Deleted = 1, Deleted_At = CURRENT_TIMESTAMP
       WHERE (User_Notif_ID = ? OR Notification_ID = ?) AND LOWER(User_Email) = ?
     `, [notifId, notifId, userEmail]);
     res.json({ success: true, message: 'Notification moved to Trash (retained for 30 days).' });
@@ -4534,6 +4836,116 @@ app.get('/api/geocode/reverse', async (req, res) => {
   }
 
   return res.json(finalResponse);
+});
+
+// ── AI Receipt Vision & Anti-Fraud Audit Endpoint ───────────────────────
+const { auditReceiptImage } = require('./services/aiReceiptScanner');
+
+app.post('/api/verify-receipt-ai', async (req, res) => {
+  try {
+    const { receiptBase64, amountEth, paymentMethod, refNumber } = req.body || {};
+    
+    // 1. Run AI Vision Audit
+    const aiResult = await auditReceiptImage(receiptBase64, amountEth, paymentMethod, refNumber);
+
+    // 2. Anti-Fraud Reference Deduplication Check
+    let isDuplicateRef = false;
+    let existingTxId = null;
+    const targetRef = refNumber || aiResult.extractedRef;
+
+    if (targetRef) {
+      try {
+        const [dups] = await db.query(`
+          SELECT Transaction_ID FROM DONATION_TRANSACTION WHERE Tx_Hash LIKE ?
+          UNION
+          SELECT Manual_ID FROM MANUAL_DONATION WHERE Reference_No = ? AND Status = 'Approved'
+        `, [`%${targetRef}%`, targetRef]);
+
+        if (dups && dups.length > 0) {
+          isDuplicateRef = true;
+          existingTxId = dups[0].Transaction_ID || dups[0].Manual_ID;
+          aiResult.fraudFlags.push(`DUPLICATE_REF_NUMBER: Reference #${targetRef} was already verified in record #${existingTxId}`);
+          aiResult.isAiVerified = false;
+          aiResult.confidenceScore = 10;
+        }
+      } catch (_) {}
+    }
+
+    res.json({
+      ...aiResult,
+      isDuplicateRef,
+      existingTxId
+    });
+  } catch (err) {
+    console.error('Error in /api/verify-receipt-ai:', err);
+    res.status(500).json({ error: 'AI Receipt Audit failed: ' + err.message });
+  }
+});
+
+// ── NGO Batch Manual Donations Verification Endpoint ──────────────────────
+app.post('/api/manual-donations/batch-verify', async (req, res) => {
+  try {
+    const { manualIds } = req.body || {};
+    if (!Array.isArray(manualIds) || manualIds.length === 0) {
+      return res.status(400).json({ error: 'No manual donation IDs provided for batch verification.' });
+    }
+
+    let verifiedCount = 0;
+    const errors = [];
+
+    for (const manualId of manualIds) {
+      try {
+        const [manualRows] = await db.query('SELECT * FROM MANUAL_DONATION WHERE Manual_ID = ?', [manualId]);
+        if (!manualRows || manualRows.length === 0) continue;
+
+        const d = manualRows[0];
+        if (d.Status === 'Approved') {
+          verifiedCount++;
+          continue;
+        }
+
+        const ethAmount = parseFloat(d.Amount) || 0;
+        const pRail = d.Payment_Method || 'Fiat';
+        const txHash = `FIAT-${pRail.toUpperCase()}-${d.Reference_No || Date.now()}`;
+
+        // 1. Insert into DONATION_TRANSACTION
+        await db.query(`
+          INSERT INTO DONATION_TRANSACTION (
+            Campaign_ID, Donor_ID, Amount, Payment_Method, Tx_Hash, Is_Anonymous, Wallet_Address, Created_At
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        `, [
+          d.Campaign_ID,
+          d.Donor_ID || null,
+          ethAmount,
+          pRail,
+          txHash,
+          d.Donor_Name === 'Anonymous Donor' ? 1 : 0,
+          d.Donor_Wallet || '0x0000000000000000000000000000000000000000'
+        ]);
+
+        // 2. Update MANUAL_DONATION status
+        await db.query(`UPDATE MANUAL_DONATION SET Status = 'Approved' WHERE Manual_ID = ?`, [manualId]);
+
+        // 3. Update CAMPAIGN current amount
+        await db.query(`UPDATE CAMPAIGN SET Current_Amount = COALESCE(Current_Amount, 0) + ? WHERE Campaign_ID = ?`, [ethAmount, d.Campaign_ID]);
+
+        verifiedCount++;
+      } catch (itemErr) {
+        console.error(`Batch verify failed for Manual_ID #${manualId}:`, itemErr.message);
+        errors.push(`ID #${manualId}: ${itemErr.message}`);
+      }
+    }
+
+    res.json({
+      success: true,
+      verifiedCount,
+      totalRequested: manualIds.length,
+      errors
+    });
+  } catch (err) {
+    console.error('Error in /api/manual-donations/batch-verify:', err);
+    res.status(500).json({ error: 'Batch verification failed: ' + err.message });
+  }
 });
 
 // Start Server

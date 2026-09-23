@@ -19,7 +19,7 @@ const dbConfig = {
   user: process.env.DB_USER || 'root',
   password: process.env.DB_PASSWORD || '',
   port: Number(process.env.DB_PORT) || 3306,
-  database: isCloud ? (process.env.DB_NAME || 'defaultdb') : (process.env.DB_NAME || 'blockchain_relief'),
+  database: process.env.DB_NAME || 'blockchain_relief',
   waitForConnections: true,
   connectionLimit: 10,
   queueLimit: 0,
@@ -611,5 +611,13 @@ module.exports = {
         });
       }
     });
-  }
+  },
+  getActiveDriver: () => activeDriver,
+  getDbConfig: () => ({
+    host: dbConfig.host,
+    user: dbConfig.user,
+    database: dbConfig.database,
+    port: dbConfig.port,
+    isCloud
+  })
 };

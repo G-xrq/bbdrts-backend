@@ -210,6 +210,20 @@ const verifyOnChainTx = async (txHash) => {
   }
 };
 
+// ── Health and Database Diagnostic Endpoint ─────────────────
+app.get('/api/health', (req, res) => {
+  const dbInfo = db.getDbConfig ? db.getDbConfig() : {};
+  res.json({
+    status: 'ok',
+    activeDriver: db.getActiveDriver ? db.getActiveDriver() : 'unknown',
+    database: dbInfo.database || 'blockchain_relief',
+    isCloud: !!process.env.DB_HOST,
+    hostConfigured: !!process.env.DB_HOST,
+    dbHost: process.env.DB_HOST ? process.env.DB_HOST.slice(0, 12) + '...' : 'localhost',
+    timestamp: new Date().toISOString()
+  });
+});
+
 // ── Autonomous Blockchain Relayer Status Endpoint ────────────
 app.get('/api/blockchain/relayer-status', async (req, res) => {
   try {
